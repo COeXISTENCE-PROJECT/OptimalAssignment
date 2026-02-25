@@ -13,7 +13,6 @@ import ast
 import json
 import logging
 import random
-import optuna
 
 import numpy as np
 import pandas as pd
@@ -32,24 +31,11 @@ import torch.nn.functional as F
 
 import shutil
 
-from torch_geometric.data import Data
-
 import networkx as nx
 import matplotlib.pyplot as plt
-import numpy as np
-import traci
 
-import networkx as nx
-from torch_geometric.utils import to_networkx
-import numpy as np
-import scipy.sparse as sp
-import torch
-import os
-import networkx as nx
-import matplotlib.pyplot as plt
 from torch_geometric.data import Data
 from torch_geometric.utils import to_networkx, from_scipy_sparse_matrix
-
 from torch_geometric.nn import GCNConv
 
 from sklearn.decomposition import PCA
@@ -57,214 +43,28 @@ from sklearn.manifold import TSNE
 
 from visualize_flow import TrafficAnimator
 
+import scipy.sparse as sp
 
 os.environ['PROJ_LIB'] = '/opt/homebrew/share/proj'
 
 testing_needed = False
 snapshot_analysis = True
-autoencoder_pretraining = True
 
-class AdvancedWorldModel(nn.Module):
-    def __init__(self, node_features, hidden_dim, latent_dim):
-        super().__init__()
-        # Encoder powinien być w stanie obsłużyć cechy grafu
-        self.encoder = GCNConv(node_features, latent_dim)
+class Network(nn.Module):
+    def __init__(self, in_size, out_size, num_hidden, widths):
+        super(Network, self).__init__()
+        assert len(widths) == (num_hidden + 1), "DQN widths and number of layers mismatch!"
         
-        # Transition: g(z_t, D_t) -> z_{t+1}
-        self.transition = nn.Sequential(
-            nn.Linear(latent_dim + 1, hidden_dim), 
-            nn.ReLU(),
-            nn.Linear(hidden_dim, latent_dim)
-        )
-        
-        self.travel_time_head = nn.Sequential(
-            nn.Linear(latent_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1)
-        )
-
-    def predict_sequence(self, A_0, D_seq, edge_index):
-        # A_0: [num_nodes, node_features]
-        # D_seq: [T, num_nodes, 1]
-        
-        z_t = self.encoder(A_0, edge_index)
-        z_history = [z_t]
-        
-        for t in range(D_seq.shape[0]):
-            # D_t dla każdego węzła: [num_nodes, 1]
-            D_t = D_seq[t] 
-            
-            # Łączymy cechy ukryte węzła z jego aktualnym popytem
-            combined = torch.cat([z_t, D_t], dim=-1) # [num_nodes, latent_dim + 1]
-            z_t = self.transition(combined)
-            z_history.append(z_t)
-
-        # Globalne uśrednienie wszystkich węzłów dla finalnego stanu (pooling)
-        final_state = z_t.mean(dim=0) 
-        predicted_r = self.travel_time_head(final_state)
-        
-        return z_history, predicted_r
-
-class InverseDemandModule(nn.Module):
-    def __init__(self, latent_dim, num_nodes):
-        super().__init__()
-        self.inverse_net = nn.Sequential(
-            nn.Linear(latent_dim * 2, 256),
-            nn.ReLU(),
-            nn.Linear(256, num_nodes),
-            nn.Sigmoid()
-        )
-
-    def retrieve_assignment(self, z_t, z_next):
-        """
-        Component 1.5: Próba odzyskania popytu D_t ze zmian w grafie
-        """
-        combined_z = torch.cat([z_t, z_next], dim=-1)
-        reconstructed_D = self.inverse_net(combined_z)
-        return reconstructed_D
-
-class ContextAttention(nn.Module):
-    def __init__(self, input_dim):
-        super().__init__()
-        # Warstwa wyliczająca wynik "ważności" dla każdego elementu wektora wejściowego
-        self.attention_weights = nn.Sequential(
-            nn.Linear(input_dim, input_dim),
-            nn.Sigmoid() # Wagi od 0 do 1
-        )
+        self.input_layer = nn.Linear(in_size, widths[0])
+        self.hidden_layers = nn.ModuleList([nn.Linear(widths[x], widths[x+1]) for x in range(num_hidden)])
+        self.out_layer = nn.Linear(widths[-1], out_size)
 
     def forward(self, x):
-        # x to połączony wektor [local_stats, global_stats]
-        weights = self.attention_weights(x)
-        # Mnożymy cechy przez ich wyuczone wagi (element-wise)
-        return x * weights, weights
-
-class TrafficAutoencoder(nn.Module):
-    def __init__(self, num_nodes, num_snaps, latent_dim=16):
-        super().__init__()
-        self.num_nodes = num_nodes
-        self.num_snaps = num_snaps
-        
-        # Wejście: [batch, num_snaps, num_nodes]
-        flattened_dim = num_snaps * num_nodes
-        
-        self.encoder = nn.Sequential(
-            nn.Linear(flattened_dim, 512),
-            nn.ReLU(),
-            nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Linear(256, latent_dim)
-        )
-        
-        self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 512),
-            nn.ReLU(),
-            nn.Linear(512, flattened_dim)
-        )
-
-    def forward(self, x):
-        # x shape: [num_snaps, num_nodes] -> zmieniamy na [1, flattened_dim]
-        original_shape = x.shape
-        x_flat = x.view(1, -1) 
-        
-        z = self.encoder(x_flat)
-        reconstructed_flat = self.decoder(z)
-        
-        # Powrót do kształtu [num_snaps, num_nodes]
-        reconstructed = reconstructed_flat.view(original_shape)
-        return reconstructed, z
-
-class ContextualAgentEmbedder(nn.Module):
-    def __init__(self, agents_df, embed_dim, device="cpu"):
-        super().__init__()
-        self.device = device
-        self.route_context = torch.zeros((len(agents_df), 3)).to(device)
-        self.global_context = torch.zeros(3).to(device)
-        
-        num_locs = max(agents_df['origin'].max(), agents_df['destination'].max()) + 1
-        self.loc_embedding = nn.Embedding(num_locs, 10)
-        self.raw_locs = torch.LongTensor(agents_df[['origin', 'destination']].values).to(device)
-
-        # Moduł uwagi dla 6 statystyk (3 lokalne + 3 globalne)
-        self.attention = ContextAttention(input_dim=6)
-
-        # Wejście do FC: 10(O) + 10(D) + 6(Attended Stats) = 26
-        self.fc = nn.Sequential(
-            nn.Linear(26, 64),
-            nn.LayerNorm(64),
-            nn.ReLU(),
-            nn.Linear(64, embed_dim)
-        )
-
-    def forward(self, agent_idx):
-        if not isinstance(agent_idx, torch.Tensor):
-            agent_idx = torch.tensor(agent_idx, device=self.device)
-        if agent_idx.dim() == 0:
-            agent_idx = agent_idx.unsqueeze(0)
-            
-        o_emb = self.loc_embedding(self.raw_locs[agent_idx, 0])
-        d_emb = self.loc_embedding(self.raw_locs[agent_idx, 1])
-        
-        # Przygotowanie statystyk
-        local_context = self.route_context[agent_idx]
-        global_context_batch = self.global_context.repeat(agent_idx.shape[0], 1)
-        stats = torch.cat([local_context, global_context_batch], dim=-1)
-        
-        # ZASTOSOWANIE ATTENTION
-        # stats_weighted to przefiltrowane informacje
-        stats_weighted, attn_scores = self.attention(stats)
-        
-        combined = torch.cat([o_emb, d_emb, stats_weighted], dim=-1)
-        
-        out = self.fc(combined)
-        return out.squeeze(0) if agent_idx.shape[0] == 1 else out   
-
-class HyperNetwork(nn.Module):    
-    """
-    HyperNetwork that generates parameters (weights and biases)
-    of a policy network conditioned on an agent embedding.
-    """
-    def __init__(self, agent_embed_dim, state_dim, action_dim, hidden_sizes):
-        """
-        Parameters
-        ----------
-        agent_embed_dim : int
-            Dimensionality of agent embedding.
-        state_dim : int
-            Input dimension of the policy network.
-        action_dim : int
-            Output dimension (number of actions).
-        hidden_sizes : list[int]
-            Hidden layer sizes of the policy network.
-        """
-        super().__init__()
-
-        # Full policy network architecture
-        layer_sizes = [state_dim] + hidden_sizes + [action_dim]
-        self.layer_sizes = layer_sizes
-
-        # Compute parameter counts per layer (weights + biases)
-        self.param_sizes = [
-            layer_sizes[i] * layer_sizes[i+1] + layer_sizes[i+1]
-            for i in range(len(layer_sizes) - 1)
-        ]
-        self.total_params = sum(self.param_sizes)
-
-        # Hypernetwork MLP that outputs all policy parameters
-        self.net = nn.Sequential(
-            nn.Linear(agent_embed_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, 256),
-            nn.ReLU(),
-            nn.Linear(256, self.total_params)
-        )
-
-    def forward(self, agent_embed):
-        """
-        Generate flattened policy parameters from an agent embedding.
-        """
-        return self.net(agent_embed)
+        x = torch.relu(self.input_layer(x))
+        for hidden_layer in self.hidden_layers:
+            x = torch.relu(hidden_layer(x))
+        x = self.out_layer(x)
+        return x
 
 class PPO(BaseLearningModel):
     """
@@ -274,8 +74,7 @@ class PPO(BaseLearningModel):
     def __init__(self,
             state_size, 
             action_space_size, 
-            agent_id, hypernet, 
-            agent_embeddings,
+            agent_id,
             device="cpu", 
             batch_size=16, 
             lr=0.003, 
@@ -294,10 +93,6 @@ class PPO(BaseLearningModel):
         self.state_size = state_size
         self.action_space_size = action_space_size
         self.agent_id = agent_id
-        
-        self.hypernet = hypernet
-        self.agent_embeddings = agent_embeddings
-        
         self.batch_size = batch_size
         self.num_epochs = num_epochs
         self.clip_eps = clip_eps
@@ -306,12 +101,10 @@ class PPO(BaseLearningModel):
         self.initial_entropy_coef = entropy_coef
         self.hidden_sizes = hidden_sizes
         self.total_training_eps = total_training_eps
-
-        # Optimizer jointly updates hypernetwork and agent embeddings
-        self.optimizer = optim.Adam(
-            list(self.hypernet.parameters()) + list(self.agent_embeddings.parameters()),
-            lr=lr
-        )
+        self.num_hidden = len(hidden_sizes)
+        self.softmax = nn.Softmax(dim=-1)
+        self.policy_net = Network(state_size, action_space_size, num_hidden, hidden_sizes).to(self.device)
+        self.optimizer = optim.Adam(self.policy_net.parameters(), lr=lr)
         
         # Linear learning-rate decay
         self.scheduler = optim.lr_scheduler.LinearLR(self.optimizer, start_factor=1.0, end_factor=0.01, total_iters=total_training_eps)
@@ -358,17 +151,14 @@ class PPO(BaseLearningModel):
         """
         Sample or select an action given the current state.
         """
-        state = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-        weights, biases = self._get_weights()
-
-        logits = functional_mlp(state, weights, biases)
-        probs = torch.softmax(logits, dim=-1)
-
+        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            logits = self.policy_net(state_tensor)
+            probs = self.softmax(logits)
         dist = torch.distributions.Categorical(probs)
         action = torch.argmax(probs) if self.deterministic else dist.sample()
 
-        # Store transition data for PPO update
-        self.last_state = state.detach().cpu().numpy()
+        self.last_state = state_tensor.detach().cpu().numpy()
         self.last_action = action.item()
         self.last_log_prob = dist.log_prob(action).item()
 
@@ -441,7 +231,7 @@ if __name__ == "__main__":
     parser.add_argument('--torch-seed', type=int, default=42)
     args = parser.parse_args()
 
-    ALGORITHM = "hyp_ippo"
+    ALGORITHM = "rl_alg"
     exp_id = args.id
     env_config = args.env_conf
     task_config = args.task_conf
@@ -463,8 +253,8 @@ if __name__ == "__main__":
     os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
     logging.getLogger("matplotlib").setLevel(logging.ERROR)
 
-    custom_network_folder = f"../networks/{network}"
-    records_folder = f"../results/{exp_id}"
+    custom_network_folder = f"networks/{network}"
+    records_folder = f"results/{exp_id}"
     snapshots_dir = os.path.join(records_folder, "snapshots")
     plots_folder = f"{records_folder}/plots"
 
@@ -482,9 +272,9 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Device is:", device)
     params = {}
-    params.update(json.load(open(f"../config/algo_config/{ALGORITHM}/{alg_config}.json")))
-    params.update(json.load(open(f"../config/env_config/{env_config}.json")))
-    params.update(json.load(open(f"../config/task_config/{task_config}.json")))
+    params.update(json.load(open(f"config/algo_config/{ALGORITHM}/{alg_config}.json")))
+    params.update(json.load(open(f"config/env_config/{env_config}.json")))
+    params.update(json.load(open(f"config/task_config/{task_config}.json")))
     del params["desc"]
 
     for k, v in params.items():
@@ -567,24 +357,11 @@ if __name__ == "__main__":
     env.start()
     env.reset()
     
-    if autoencoder_pretraining:
-        adj_matrix, edge_to_idx = get_edge_adjacency_matrix(env, network)
-        edge_index, _ = from_scipy_sparse_matrix(sp.coo_matrix(adj_matrix))
-        edge_index = edge_index.to(device)
-        edge_coords = get_edge_coords(env) 
-        num_nodes = len(edge_to_idx)
-        latent_dim = 16
-        
-        world_model = AdvancedWorldModel(node_features=1, hidden_dim=64, latent_dim=latent_dim).to(device)
-        autoencoder = TrafficAutoencoder(num_nodes=num_nodes, num_snaps=50, latent_dim=latent_dim).to(device)
-        inverse_model = InverseDemandModule(latent_dim=latent_dim, num_nodes=num_nodes).to(device)
-        ae_optimizer = optim.Adam(autoencoder.parameters(), lr=1e-3)
-    
-    
     pbar = tqdm(total=total_episodes, desc="Human learning")
     for _ in range(human_learning_episodes):
         env.step()
         pbar.update()
+    
     env.mutation(disable_human_learning=not should_humans_adapt,
         mutation_start_percentile=-1)
     
@@ -593,23 +370,6 @@ if __name__ == "__main__":
 
     machine_ids = [int(a.id) for a in env.machine_agents]
     machine_features_df = agents_df[agents_df['id'].isin(machine_ids)].reset_index(drop=True)
-    
-    
-    ### HYPERNETWORK + VECTOR EMBEDDING ###
-    
-    
-    agent_embed_dim = 64
-    agent_embeddings = ContextualAgentEmbedder(
-            machine_features_df, 
-            agent_embed_dim, 
-            device=device
-        ).to(device)
-    hypernet = HyperNetwork(
-        agent_embed_dim,
-        obs_size,
-        action_size,
-        hidden_sizes=widths
-    ).to(device)
 
 
     ### AGENT MODEL INITIALIZATION ###
@@ -620,8 +380,6 @@ if __name__ == "__main__":
             state_size=obs_size,
             action_space_size=action_size,
             agent_id=idx,
-            hypernet=hypernet,
-            agent_embeddings=agent_embeddings,
             device=device,
             batch_size=batch_size,
             lr=lr,
@@ -642,9 +400,7 @@ if __name__ == "__main__":
     pbar.set_description("AV learning")
     os.makedirs(plots_folder, exist_ok=True)
     for episode in range(training_eps):
-        if episode > 0 and episode % update_every == 0:
-            update_agent_context(agent_embeddings, exp_id, episode, machine_features_df, device)
-        
+
         env.reset()
         env.machine_agents[0].model.update_params(episode) 
         snapshot_interval = 1
@@ -656,11 +412,8 @@ if __name__ == "__main__":
             
             current_sim_step = env.unwrapped.simulator.timestep
            
-            if snapshots_taken < no_snaps: #and current_sim_step >= (snapshots_taken * snapshot_interval):
+            if snapshots_taken < no_snaps:
                 snap_path = env.unwrapped.simulator.save_snapshot_two(episode, snapshots_taken)
-                
-                A_t = torch.zeros((num_nodes, 1), device=device)
-                episode_snapshots.append(A_t)
                 snapshots_taken += 1
 
             if term or trunc:
@@ -673,100 +426,24 @@ if __name__ == "__main__":
                 action = agent_lookup[agent_id].model.act(obs)
             env.step(action)
 
-            if len(episode_snapshots) ==  no_snaps:
-                    target_seq = torch.stack(episode_snapshots).squeeze(-1) 
-                    ae_optimizer.zero_grad()
-                    reconstructed_seq, _ = autoencoder(target_seq)
-                    loss = calculate_component2_loss(reconstructed_seq, target_seq)
-                    loss.backward()
-                    ae_optimizer.step()
-            
-        #if episode % plot_every == 0:
-        if 1:
-            flow_matrix = aggregate_episode_flow(episode, snapshots_dir, edge_to_idx)
-            #graph_data = build_pyg_data(adj_matrix, flow_matrix, device=device)
-            #visualize_traffic_graph(graph_data, edge_to_idx, exp_id)
-            edge_counts = {eid: flow_matrix[idx].sum() for eid, idx in edge_to_idx.items()}
-
         pbar.update()
 
 
-    ### LATENT SPACE OPTIMIZATION ###
-    
-
-    ae_optimizer = optim.Adam(autoencoder.parameters(), lr=1e-3)
-    initial_state_A0 = torch.zeros((1, num_nodes), device=device)
-    
-    opt_z = optimize_latent_assignment(
-        world_model, 
-        autoencoder, 
-        edge_index=edge_index,
-        device=device, 
-        latent_dim=16,
-        num_nodes=num_nodes,
-    )
-    opt_G_T, opt_assignment = retrieve_optimal_solution(opt_z, autoencoder, inverse_model, initial_state_A0)
-    opt_assignment_np = opt_assignment.detach().cpu().numpy().flatten()
-    edge_ids = list(edge_to_idx.keys())
-    opt_assignment_df = pd.DataFrame({
-        'edge_id': edge_ids,
-        'optimal_demand_prob': opt_assignment_np
-    })
-    opt_assignment_path = os.path.join(records_folder, "optimized_assignment.csv")
-    opt_assignment_df.to_csv(opt_assignment_path, index=False)
-    print(f"Optimal assignment retrieved and saved to {opt_assignment_path}")
-
-
-
-    ### TESTING PHASE ###
-    
-    
-    if testing_needed:
-        pbar.set_description("Testing")
-        for _ in range(test_eps):
-            env.reset()
-            for agent_id in env.agent_iter():
-                obs, _, term, trunc, _ = env.last()
-                action = None if (term or trunc) else agent_lookup[agent_id].model.act(obs)
-                env.step(action)
-            pbar.update()
+    pbar.set_description("Testing")
+    for _ in range(test_eps):
+        env.reset()
+        for agent_id in env.agent_iter():
+            obs, _, term, trunc, _ = env.last()
+            action = None if (term or trunc) else agent_lookup[agent_id].model.act(obs)
+            env.step(action)
+        pbar.update()
 
     pbar.close()
     env.stop_simulation()
-    
-    if snapshot_analysis:
+
+    shutil.copytree(
+        os.path.join(records_folder, "SUMO_output"),
+        snapshots_dir,
+        dirs_exist_ok=True
+    )
         
-        
-        ### COPYING SNAPSHOT FILES TO A DEDICATED DIRECTORY FOR ANALYSIS ###
-        
-        
-        shutil.copytree(
-            os.path.join(records_folder, "SUMO_output"),
-            snapshots_dir,
-            dirs_exist_ok=True
-        )
-        
-        
-        ### BUILING GRAPH REPRESENTATION ###
-        
-        
-        existing_files = [f for f in os.listdir(snapshots_dir) if f.startswith("es_ep")]
-        if existing_files:
-            available_eps = [int(f.split('_ep')[1].split('_')[0]) for f in existing_files]
-            last_recorded_ep = max(available_eps)
-            print(f"Found snapshots for episode {last_recorded_ep}. Aggregating...")
-            flow_matrix = aggregate_episode_flow(last_recorded_ep, snapshots_dir, edge_to_idx)
-            #plot_traffic_heatmap(1, snapshots_dir, edge_coords, top_n=30)
-        else:
-            print("!!! Warning: No snapshot files (es_ep) found in snapshots_dir.")
-            flow_matrix = np.zeros((len(edge_to_idx), len(edge_to_idx)))
-        
-        graph_data = build_pyg_data(adj_matrix, flow_matrix)
-        print(f"Total nodes: {graph_data.num_nodes}")
-        print(f"Total connections: {graph_data.num_edges}")
-        if graph_data.x.sum() > 0:
-            print(f"Max Flow on single edge: {graph_data.x.max().item()} vehicles")
-            visualize_traffic_graph(graph_data, edge_to_idx, exp_id)
-        else:
-            print("Files found in snapshots directory:", os.listdir(snapshots_dir)[:10])
-            
