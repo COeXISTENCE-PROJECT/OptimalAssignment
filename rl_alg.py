@@ -350,9 +350,7 @@ if __name__ == "__main__":
         }
     )
 
-
     ### SIMULATION SETUP AND TRAINING LOOP ###
-
 
     env.start()
     env.reset()
@@ -371,9 +369,7 @@ if __name__ == "__main__":
     machine_ids = [int(a.id) for a in env.machine_agents]
     machine_features_df = agents_df[agents_df['id'].isin(machine_ids)].reset_index(drop=True)
 
-
     ### AGENT MODEL INITIALIZATION ###
-
 
     for idx, agent in enumerate(env.machine_agents):
         agent.model = PPO(
@@ -391,7 +387,6 @@ if __name__ == "__main__":
             total_training_eps=training_eps
         )
     agent_lookup = {str(agent.id): agent for agent in env.machine_agents}
-
 
     ### AV LEARNING PHASE ###
     
@@ -428,7 +423,6 @@ if __name__ == "__main__":
 
         pbar.update()
 
-
     pbar.set_description("Testing")
     for _ in range(test_eps):
         env.reset()
@@ -446,4 +440,3 @@ if __name__ == "__main__":
         snapshots_dir,
         dirs_exist_ok=True
     )
-        
