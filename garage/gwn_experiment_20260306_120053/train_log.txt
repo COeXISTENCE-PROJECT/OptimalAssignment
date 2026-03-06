@@ -1,0 +1,13 @@
+Traceback (most recent call last):
+  File "C:\Users\454949\PycharmProjects\Graph-WaveNet\train.py", line 305, in <module>
+    main()
+  File "C:\Users\454949\PycharmProjects\Graph-WaveNet\train.py", line 183, in main
+    supports = [torch.tensor(i).to(device) for i in adj_mx]
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\454949\PycharmProjects\Graph-WaveNet\train.py", line 183, in <listcomp>
+    supports = [torch.tensor(i).to(device) for i in adj_mx]
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\454949\PycharmProjects\Graph-WaveNet\.venv\Lib\site-packages\torch\cuda\__init__.py", line 417, in _lazy_init
+    raise AssertionError("Torch not compiled with CUDA enabled")
+AssertionError: Torch not compiled with CUDA enabled
+[0m
