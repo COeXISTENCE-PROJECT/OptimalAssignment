@@ -254,3 +254,4 @@ class gwnet(nn.Module):
         x = self.end_conv_2(x)
         return x
 
+

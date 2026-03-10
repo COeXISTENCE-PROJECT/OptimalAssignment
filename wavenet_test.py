@@ -14,7 +14,7 @@ def run_wavenet_training():
     base_dir = os.path.abspath(os.path.dirname(__file__))
 
     # Experiment identification (SLURM_JOB_ID if available, otherwise a timestamp)
-    job_id = os.environ.get("SLURM_JOB_ID", datetime.now().strftime("%Y%m%d_%H%M%S"))
+    job_id = os.environ.get("slurm job id", datetime.now().strftime("%Y%m%d_%H%M%S"))
 
     # Define absolute paths
     data_dir = os.path.join(base_dir, "data", "WAVENET_READY")
@@ -34,23 +34,28 @@ def run_wavenet_training():
     epochs = "2"
     batch_size = "64"
     learning_rate = "0.001"
+    nhid = "32"  #number of hidded dimentions
 
     # Define arguments as a list of strings
     command = [
         sys.executable, os.path.join(base_dir, "train.py"),
-        "--device", "cuda:0",
+        "--device", "cpu",
         "--data", data_dir,
         "--adjdata", adj_path,
         "--adjtype", "doubletransition",
         "--num_nodes", num_nodes,
         "--in_dim", in_dim,
-        "--seq_length", seq_length,
+        "--seq_length", seq_length,    #to check
+        "--nhid", nhid,
         "--addaptadj",
         "--epochs", epochs,
         "--print_every", "10",
         "--batch_size", batch_size,
         "--learning_rate", learning_rate,
-        "--save", model_save_prefix
+        "--save", model_save_prefix,
+        "--kernel_size", "2",
+        "--blocks", "4",
+        "--layers", "2"
     ]
 
     print(f"Starting experiment (ID: {job_id})")
@@ -145,8 +150,8 @@ def main():
 
 
 # training execution
-# if __name__ == "__main__":
-#     run_wavenet_training()
+if __name__ == "__main__":
+     run_wavenet_training()
 
 # training statistics execution
 if __name__ == "__main__":

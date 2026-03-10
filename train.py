@@ -30,6 +30,11 @@ parser.add_argument('--print_every', type=int, default=50, help='')
 # parser.add_argument('--seed',type=int,default=99,help='random seed')
 parser.add_argument('--save', type=str, default='./garage/metr', help='save path')
 parser.add_argument('--expid', type=int, default=1, help='experiment id')
+parser.add_argument('--kernel_size', type=int, default=2, help='convolution kernel size')
+parser.add_argument('--blocks', type=int, default=4, help='number of ST blocks')
+parser.add_argument('--layers', type=int, default=2, help='number of layers in one spatial or tempolar network')
+
+
 
 args = parser.parse_args()
 
@@ -57,7 +62,7 @@ def main():
 
     engine = Trainer(scaler, args.in_dim, args.seq_length, args.num_nodes, args.nhid, args.dropout,
                      args.learning_rate, args.weight_decay, device, supports, args.gcn_bool, args.addaptadj,
-                     adjinit)
+                     adjinit, args.kernel_size, args.blocks, args.layers)
 
     print("start training...", flush=True)
 
