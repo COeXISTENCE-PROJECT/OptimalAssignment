@@ -143,20 +143,18 @@ def main():
     print("Average Training Time: {:.4f} secs/epoch".format(np.mean(history['train_time'])))
     print("Average Inference Time: {:.4f} secs".format(np.mean(history['val_time'])))
 
-    # ==========================================
-    # ZAPIS STATYSTYK I GENEROWANIE WYKRESÓW
-    # ==========================================
-    # Wyciągamy katalog docelowy z podanego prefiksu (args.save)
+    #collecting and saving training data
+
     save_dir = os.path.dirname(os.path.abspath(args.save))
     os.makedirs(save_dir, exist_ok=True)
 
-    # 1. Zapis do CSV
+    # save to csv
     df_metrics = pd.DataFrame(history)
     csv_path = os.path.join(save_dir, "data/training_metrics.csv")
     df_metrics.to_csv(csv_path, index=False)
     print(f"Statistics saved to: {csv_path}")
 
-    # 2. Generowanie wykresów krzywych uczenia (Loss, MAPE, RMSE)
+    # learning curves
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     epochs_range = history['epoch']
 
@@ -189,7 +187,6 @@ def main():
     plt.savefig(plot_path, dpi=300)
     plt.close()
     print(f"saved learning curves to: {plot_path}")
-    # ==========================================
 
     # testing
     bestid = np.argmin(his_loss)
