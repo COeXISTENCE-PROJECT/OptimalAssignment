@@ -9,15 +9,14 @@ import argparse
 def run_wavenet_training():
     """
     Initializes the Graph WaveNet training process with support for absolute paths
-    and SLURM environment variables.
     """
-    # 1. Determine the base directory (where this script is located)
+    # Determine the base directory (where this script is located)
     base_dir = os.path.abspath(os.path.dirname(__file__))
 
-    # 2. Experiment identification (SLURM_JOB_ID if available, otherwise a timestamp)
+    # Experiment identification (SLURM_JOB_ID if available, otherwise a timestamp)
     job_id = os.environ.get("SLURM_JOB_ID", datetime.now().strftime("%Y%m%d_%H%M%S"))
 
-    # 3. Define absolute paths
+    # Define absolute paths
     data_dir = os.path.join(base_dir, "data", "WAVENET_READY")
     adj_path = os.path.join(base_dir, "data", "adjacency_matrix.csv")
 
@@ -28,9 +27,7 @@ def run_wavenet_training():
     # The --save parameter in train.py is used as a save prefix (e.g., save_dir/model_epoch_1.pth)
     model_save_prefix = os.path.join(save_dir, "model")
 
-    # ==========================================
     # Input tensor and topology parameters
-    # ==========================================
     num_nodes = "770"
     in_dim = "1"
     seq_length = "12"
@@ -41,7 +38,7 @@ def run_wavenet_training():
     # Define arguments as a list of strings
     command = [
         sys.executable, os.path.join(base_dir, "train.py"),
-        "--device", "cuda:0",  # Changed to cuda:0 assuming GPU access on SLURM
+        "--device", "cuda:0",
         "--data", data_dir,
         "--adjdata", adj_path,
         "--adjtype", "doubletransition",
@@ -56,7 +53,7 @@ def run_wavenet_training():
         "--save", model_save_prefix
     ]
 
-    print(f"=== Starting experiment (ID: {job_id}) ===")
+    print(f"Starting experiment (ID: {job_id})")
     print(f"Save directory: {save_dir}")
 
     # Execute the process
@@ -69,13 +66,13 @@ def run_wavenet_training():
     process.wait()
 
     if process.returncode == 0:
-        print("=== Training completed successfully ===")
+        print("Training completed successfully")
     else:
-        print(f"=== Error! Process exited with code {process.returncode} ===")
+        print(f"Error! Process exited with code {process.returncode}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Graph WaveNet training statistics analysis")
+    parser = argparse.ArgumentParser(description="training statistics analysis")
     parser.add_argument('csv_path', type=str, help='Path to the training_metrics.csv file')
     args = parser.parse_args()
 
@@ -97,12 +94,12 @@ def main():
         print("Error: CSV file does not contain all required columns.")
         sys.exit(1)
 
-    # 1. Extremes analysis (best epochs)
+    # Extremes analysis (best epochs)
     best_loss_idx = df['valid_loss'].idxmin()
     best_rmse_idx = df['valid_rmse'].idxmin()
     best_mape_idx = df['valid_mape'].idxmin()
 
-    # 2. Calculate Generalization Gap for Loss (MAE) at the best epoch
+    # Calculate Generalization Gap for Loss (MAE) at the best epoch
     # This helps assess how much the model is overfitting to the training set compared to the validation set
     best_val_loss = df.loc[best_loss_idx, 'valid_loss']
     corresponding_train_loss = df.loc[best_loss_idx, 'train_loss']
@@ -113,11 +110,9 @@ def main():
     total_val_time = df['val_time'].sum()
     mean_epoch_time = df['train_time'].mean()
 
-    # ==========================================
-    # FORMATTING AND DISPLAYING RESULTS
-    # ==========================================
+    # formaring and displaying
     print("=" * 60)
-    print(f" TRAINING REPORT: {os.path.basename(os.path.dirname(args.csv_path))}")
+    print(f" training report: {os.path.basename(os.path.dirname(args.csv_path))}")
     print("=" * 60)
 
     print(f"\n[1] time summary")
@@ -139,7 +134,7 @@ def main():
     print(f"  • Generalization Gap: {gen_gap:.4f}")
 
     if gen_gap > (0.2 * corresponding_train_loss):
-        print("  ! WARNING: Significant difference between training and validation error (over 20%).")
+        print("    Significant difference between training and validation error (over 20%).")
         print("    This may suggest an early stage of model overfitting.")
 
     # 4. Preview of the last 5 epochs (trend)
