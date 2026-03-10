@@ -4,27 +4,32 @@ import os
 from datetime import datetime
 import pandas as pd
 import argparse
-import os
-import sys
 
 
 def run_wavenet_training():
     """
-    Inicjuje proces treningowy Graph WaveNet z obsługą ścieżek bezwzględnych
-    i zmiennych środowiskowych SLURM.
+    Initializes the Graph WaveNet training process with support for absolute paths
+    and SLURM environment variables.
     """
-
+    # 1. Determine the base directory (where this script is located)
     base_dir = os.path.abspath(os.path.dirname(__file__))
+
+    # 2. Experiment identification (SLURM_JOB_ID if available, otherwise a timestamp)
     job_id = os.environ.get("SLURM_JOB_ID", datetime.now().strftime("%Y%m%d_%H%M%S"))
+
+    # 3. Define absolute paths
     data_dir = os.path.join(base_dir, "data", "WAVENET_READY")
     adj_path = os.path.join(base_dir, "data", "adjacency_matrix.csv")
+
+    # Create a unique directory for this specific job
     save_dir = os.path.join(base_dir, "garage", f"experiment_{job_id}")
     os.makedirs(save_dir, exist_ok=True)
 
+    # The --save parameter in train.py is used as a save prefix (e.g., save_dir/model_epoch_1.pth)
     model_save_prefix = os.path.join(save_dir, "model")
 
     # ==========================================
-    # Parametry tensora wejściowego i topologii
+    # Input tensor and topology parameters
     # ==========================================
     num_nodes = "770"
     in_dim = "1"
@@ -33,144 +38,121 @@ def run_wavenet_training():
     batch_size = "64"
     learning_rate = "0.001"
 
-    # Definicja argumentów jako lista stringów
+    # Define arguments as a list of strings
     command = [
-        sys.executable,
-        os.path.join(base_dir, "train.py"),
-        "--device",
-        "cuda:0",  # Zmieniono na cuda:0 zakladajac dostep do GPU na slurm
-        "--data",
-        data_dir,
-        "--adjdata",
-        adj_path,
-        "--adjtype",
-        "doubletransition",
-        "--num_nodes",
-        num_nodes,
-        "--in_dim",
-        in_dim,
-        "--seq_length",
-        seq_length,
+        sys.executable, os.path.join(base_dir, "train.py"),
+        "--device", "cuda:0",  # Changed to cuda:0 assuming GPU access on SLURM
+        "--data", data_dir,
+        "--adjdata", adj_path,
+        "--adjtype", "doubletransition",
+        "--num_nodes", num_nodes,
+        "--in_dim", in_dim,
+        "--seq_length", seq_length,
         "--addaptadj",
-        "--epochs",
-        epochs,
-        "--print_every",
-        "10",
-        "--batch_size",
-        batch_size,
-        "--learning_rate",
-        learning_rate,
-        "--save",
-        model_save_prefix,
+        "--epochs", epochs,
+        "--print_every", "10",
+        "--batch_size", batch_size,
+        "--learning_rate", learning_rate,
+        "--save", model_save_prefix
     ]
 
-    print(f"=== Rozpoczynam eksperyment (ID: {job_id}) ===")
-    print(f"Katalog zapisu: {save_dir}")
+    print(f"=== Starting experiment (ID: {job_id}) ===")
+    print(f"Save directory: {save_dir}")
 
-    process = subprocess.Popen(
-        command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-    )
+    # Execute the process
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
+    # Read stdout line by line to display training progress in real-time
     for line in process.stdout:
         print(line, end="")
 
     process.wait()
 
     if process.returncode == 0:
-        print("=== Trening zakończony sukcesem ===")
+        print("=== Training completed successfully ===")
     else:
-        print(f"=== Błąd! Proces zakończył się kodem {process.returncode} ===")
+        print(f"=== Error! Process exited with code {process.returncode} ===")
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Analiza statystyk treningowych Graph WaveNet"
-    )
-    parser.add_argument(
-        "csv_path", type=str, help="Ścieżka do pliku training_metrics.csv"
-    )
+    parser = argparse.ArgumentParser(description="Graph WaveNet training statistics analysis")
+    parser.add_argument('csv_path', type=str, help='Path to the training_metrics.csv file')
     args = parser.parse_args()
 
+    # Check if the file exists
     if not os.path.exists(args.csv_path):
-        print(f"Błąd: Plik {args.csv_path} nie istnieje.")
+        print(f"Error: File {args.csv_path} does not exist.")
         sys.exit(1)
 
+    # Load data using Pandas
     try:
         df = pd.read_csv(args.csv_path)
     except Exception as e:
-        print(f"Błąd podczas wczytywania pliku CSV: {e}")
+        print(f"Error loading CSV file: {e}")
         sys.exit(1)
 
-    # Weryfikacja wymaganych kolumn
-    required_columns = [
-        "epoch",
-        "train_loss",
-        "valid_loss",
-        "valid_rmse",
-        "valid_mape",
-        "train_time",
-        "val_time",
-    ]
+    # Verify required columns are present
+    required_columns = ['epoch', 'train_loss', 'valid_loss', 'valid_rmse', 'valid_mape', 'train_time', 'val_time']
     if not all(col in df.columns for col in required_columns):
-        print("Błąd: Plik CSV nie zawiera wszystkich wymaganych kolumn.")
+        print("Error: CSV file does not contain all required columns.")
         sys.exit(1)
 
-    # 1. Analiza ekstremów (najlepsze epoki)
-    best_loss_idx = df["valid_loss"].idxmin()
-    best_rmse_idx = df["valid_rmse"].idxmin()
-    best_mape_idx = df["valid_mape"].idxmin()
+    # 1. Extremes analysis (best epochs)
+    best_loss_idx = df['valid_loss'].idxmin()
+    best_rmse_idx = df['valid_rmse'].idxmin()
+    best_mape_idx = df['valid_mape'].idxmin()
 
-    # 2. Obliczenie Generalization Gap dla Loss (MAE) w najlepszej epoce
-    best_val_loss = df.loc[best_loss_idx, "valid_loss"]
-    corresponding_train_loss = df.loc[best_loss_idx, "train_loss"]
+    # 2. Calculate Generalization Gap for Loss (MAE) at the best epoch
+    # This helps assess how much the model is overfitting to the training set compared to the validation set
+    best_val_loss = df.loc[best_loss_idx, 'valid_loss']
+    corresponding_train_loss = df.loc[best_loss_idx, 'train_loss']
     gen_gap = best_val_loss - corresponding_train_loss
 
-    # 3. Analiza czasowa
-    total_train_time = df["train_time"].sum()
-    total_val_time = df["val_time"].sum()
-    mean_epoch_time = df["train_time"].mean()
+    # 3. Time analysis
+    total_train_time = df['train_time'].sum()
+    total_val_time = df['val_time'].sum()
+    mean_epoch_time = df['train_time'].mean()
 
+    # ==========================================
+    # FORMATTING AND DISPLAYING RESULTS
+    # ==========================================
     print("=" * 60)
-    print(f" RAPORT Z TRENINGU: {os.path.basename(os.path.dirname(args.csv_path))}")
+    print(f" TRAINING REPORT: {os.path.basename(os.path.dirname(args.csv_path))}")
     print("=" * 60)
 
-    print(f"\n[1] PODSUMOWANIE CZASOWE")
-    print(f"  • Zarejestrowane epoki:     {len(df)}")
-    print(f"  • Całkowity czas treningu:  {total_train_time / 60:.2f} min")
-    print(f"  • Całkowity czas walidacji: {total_val_time / 60:.2f} min")
-    print(f"  • Średni czas na epokę:     {mean_epoch_time:.2f} s")
+    print(f"\n[1] time summary")
+    print(f"  • Recorded epochs:      {len(df)}")
+    print(f"  • Total training time:  {total_train_time / 60:.2f} min")
+    print(f"  • Total validation time: {total_val_time / 60:.2f} min")
+    print(f"  • Average epoch time:   {mean_epoch_time:.2f} s")
 
-    print(f"\n[2] OPTYMALNE PUNKTY ZATRZYMANIA (Względem zbioru walidacyjnego)")
+    print(f"\n[2] optimal training stopping points (Relative to the validation set)")
+    print(f"  • Minimum Loss (MAE): {best_val_loss:.4f} (Achieved at epoch: {df.loc[best_loss_idx, 'epoch']})")
     print(
-        f"  • Minimum Loss (MAE): {best_val_loss:.4f} (Osiągnięte w epoce: {df.loc[best_loss_idx, 'epoch']})"
-    )
+        f"  • Minimum RMSE:       {df.loc[best_rmse_idx, 'valid_rmse']:.4f} (Achieved at epoch: {df.loc[best_rmse_idx, 'epoch']})")
     print(
-        f"  • Minimum RMSE:       {df.loc[best_rmse_idx, 'valid_rmse']:.4f} (Osiągnięte w epoce: {df.loc[best_rmse_idx, 'epoch']})"
-    )
-    print(
-        f"  • Minimum MAPE:       {df.loc[best_mape_idx, 'valid_mape']:.4f} (Osiągnięte w epoce: {df.loc[best_mape_idx, 'epoch']})"
-    )
+        f"  • Minimum MAPE:       {df.loc[best_mape_idx, 'valid_mape']:.4f} (Achieved at epoch: {df.loc[best_mape_idx, 'epoch']})")
 
-    print(
-        f"\n[3] ANALIZA PRZEUCZENIA (Dla optymalnej epoki {df.loc[best_loss_idx, 'epoch']})"
-    )
+    print(f"\n[3] overfitting analysis (For optimal epoch {df.loc[best_loss_idx, 'epoch']})")
     print(f"  • Train Loss (MAE):   {corresponding_train_loss:.4f}")
     print(f"  • Valid Loss (MAE):   {best_val_loss:.4f}")
     print(f"  • Generalization Gap: {gen_gap:.4f}")
-    if gen_gap > (0.2 * corresponding_train_loss):
-        print(
-            "  ! UWAGA: Znaczna różnica między błędem treningowym a walidacyjnym (powyżej 20%)."
-        )
-        print("    Może to sugerować wczesne stadium przeuczenia modelu (overfitting).")
 
-    print(f"\n[4] TREND Z OSTATNICH 5 EPOK")
-    recent_df = df.tail(5)[["epoch", "train_loss", "valid_loss", "valid_rmse"]].copy()
+    if gen_gap > (0.2 * corresponding_train_loss):
+        print("  ! WARNING: Significant difference between training and validation error (over 20%).")
+        print("    This may suggest an early stage of model overfitting.")
+
+    # 4. Preview of the last 5 epochs (trend)
+    print(f"\n[4] last 5 epochs")
+    recent_df = df.tail(5)[['epoch', 'train_loss', 'valid_loss', 'valid_rmse']].copy()
     print(recent_df.to_string(index=False))
     print("=" * 60)
 
 
-if __name__ == "__main__":
-    run_wavenet_training()
+# training execution
+# if __name__ == "__main__":
+#     run_wavenet_training()
 
+# training statistics execution
 if __name__ == "__main__":
     main()
