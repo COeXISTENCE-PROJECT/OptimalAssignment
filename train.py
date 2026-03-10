@@ -61,7 +61,7 @@ def main():
 
     print("start training...", flush=True)
 
-    # INICJALIZACJA SŁOWNIKA DO STATYSTYK
+    # initialization of dict for statistical analysis
     history = {
         'epoch': [],
         'train_loss': [], 'train_mape': [], 'train_rmse': [],
@@ -154,13 +154,13 @@ def main():
     df_metrics = pd.DataFrame(history)
     csv_path = os.path.join(save_dir, "data/training_metrics.csv")
     df_metrics.to_csv(csv_path, index=False)
-    print(f"Zapisano statystyki treningu do: {csv_path}")
+    print(f"Statistics saved to: {csv_path}")
 
     # 2. Generowanie wykresów krzywych uczenia (Loss, MAPE, RMSE)
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     epochs_range = history['epoch']
 
-    # Wykres Loss (MAE)
+    # plot (MAE)
     axes[0].plot(epochs_range, history['train_loss'], label='Train Loss (MAE)', color='blue')
     axes[0].plot(epochs_range, history['valid_loss'], label='Valid Loss (MAE)', color='orange')
     axes[0].set_title('Loss (MAE)')
@@ -168,7 +168,7 @@ def main():
     axes[0].legend()
     axes[0].grid(True, linestyle='--', alpha=0.7)
 
-    # Wykres MAPE
+    # plot MAPE
     axes[1].plot(epochs_range, history['train_mape'], label='Train MAPE', color='blue')
     axes[1].plot(epochs_range, history['valid_mape'], label='Valid MAPE', color='orange')
     axes[1].set_title('MAPE')
@@ -176,7 +176,7 @@ def main():
     axes[1].legend()
     axes[1].grid(True, linestyle='--', alpha=0.7)
 
-    # Wykres RMSE
+    # plot RMSE
     axes[2].plot(epochs_range, history['train_rmse'], label='Train RMSE', color='blue')
     axes[2].plot(epochs_range, history['valid_rmse'], label='Valid RMSE', color='orange')
     axes[2].set_title('RMSE')
@@ -188,7 +188,7 @@ def main():
     plot_path = os.path.join(save_dir, "data/learning_curves.png")
     plt.savefig(plot_path, dpi=300)
     plt.close()
-    print(f"Zapisano krzywe uczenia do: {plot_path}")
+    print(f"saved learning curves to: {plot_path}")
     # ==========================================
 
     # testing
