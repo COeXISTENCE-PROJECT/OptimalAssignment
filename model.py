@@ -4,6 +4,8 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 import sys
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
+import math
+
 
 
 
@@ -88,77 +90,188 @@ class fuse(nn.Module):
         return output
 
 
-
-
-class recurrent(nn.Module):
+class PositionalEncoding(nn.Module):
     """
-    Implementation of a recurrent module for processing Assignment matrices.
-    Handles variable-length sequences using padding and packing.
+    Positional encoding for self attention using trigonometric functions
     """
 
-    def __init__(self, input_size, embedding_size, hidden_size, dropout, num_layers):
-        super(recurrent, self).__init__()
+    def __init__(self, d_model, max_len=5000):
+        super().__init__()
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe.unsqueeze(0))  # dim: (1, max_len, d_model)
 
-        # Initial projection of the flattened N x N matrix into an embedding space
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x dim: (batch_size, T, d_model)
+        return x + self.pe[:, :x.size(1), :]
+
+
+class GRU_Representation(nn.Module):
+
+    def __init__(self, input_size, embedding_size, hidden_size, dropout = 0.0, num_layers = 1):
+        super().__init__()
+
+        # input_size = N * N * M
         self.assignment_encoder = nn.Sequential(
             nn.Linear(input_size, embedding_size),
             nn.ReLU()
         )
 
-        # GRU module with batch_first=True (Batch, Seq, Feature)
         self.gru = nn.GRU(
-            embedding_size,
-            hidden_size,
+            input_size=embedding_size,
+            hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True,
             dropout=dropout if num_layers > 1 else 0.0
         )
 
-    def forward(self, A_seq, lengths):
+    def forward(self, A_seq: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
-            A_seq (Tensor): Input sequence of shape (batch_size, T, N, N)
-            lengths (Tensor): Actual lengths (k) for each sequence in the batch
+            A_seq (Tensor): Tensor of dimensions: (batch_size, T, N, N, M)
+                            N and M could be permuted
+
 
         Returns:
-            output (Tensor): Full sequence representations (batch_size, T, hidden_size)
-            final_hidden (Tensor): Aggregated representation from the last real step (batch_size, hidden_size)
+            output (Tensor): makes a representation of dimensions (batch_size, T, hidden_size)
         """
-        batch_size, T, N, _ = A_seq.shape
 
-        # Flatten the N x N matrices into vectors (shape: batch_size, T, N*N)
+        batch_size, T = A_seq.shape[:2]
+
+        # flattening of dimentions N x N x M
+        #dim : (batch_size, T, N * N * M)
         A_seq_flat = A_seq.view(batch_size, T, -1)
 
-        # Encode each assignment matrix in the sequence
-        # Shape: (batch_size, T, embedding_size)
-        raw_embeddings = self.assignment_encoder(A_seq_flat)
+        #embedding of the spatial dimentions
+        #dim : (batch_size, T, embedding_size)
+        embeddings = self.assignment_encoder(A_seq_flat)
 
-        # Pack the padded sequence to prevent GRU from processing zero-padding
-        # lengths must be on CPU for this utility function
-        lengths_cpu = lengths.cpu() if isinstance(lengths, torch.Tensor) else lengths
+        #gru function
+        #output of dimentions (batch_size, T, hidden_size)
+        output, hidden = self.gru(embeddings)
 
-        embeddings = pack_padded_sequence(
-            raw_embeddings,
-            lengths_cpu,
-            batch_first=True,
-            enforce_sorted=False
+        return output
+
+
+class AttentionRepresentation(nn.Module):
+
+    def __init__(self, input_size, embedding_size, num_heads, dim_feedforward, dropout = 0.0, num_layers = 1):
+        super().__init__()
+
+        self.assignment_encoder = nn.Sequential(
+            nn.Linear(input_size, embedding_size),
+            nn.ReLU()
         )
 
-        # Forward pass through GRU
-        # packed_output: Internal packed representation
-        # hidden: Contains the state after the last 'valid' step for each layer
-        packed_output, hidden = self.gru(embeddings)
+        self.pos_encoder = PositionalEncoding(d_model=embedding_size)
 
-        # Unpack the sequence back to a regular padded tensor
-        # Shape: (batch_size, T, hidden_size)
-        output, _ = pad_packed_sequence(packed_output, batch_first=True, total_length=T)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embedding_size,
+            nhead=num_heads,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            batch_first=True
+        )
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
-        # Extract the hidden state of the last layer
-        # from step 'k' into this hidden tensor.
-        # Shape: (batch_size, hidden_size)
-        final_hidden = hidden[-1]
+    def forward(self, A_seq: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            A_seq: tensof of dimentions: (batch_size, T, N, N, M).
 
-        return output, final_hidden
+        Returns:
+            output (Tensor): context representation of A_seq, dimensions : (batch_size, T, hidden_size)
+        """
+        batch_size, T = A_seq.shape[:2]
+
+        A_seq_flat = A_seq.view(batch_size, T, -1)
+        embeddings = self.assignment_encoder(A_seq_flat)
+
+        # positional encoding
+        embeddings_pos = self.pos_encoder(embeddings)
+
+        # self attention
+        #output dimensions (batch_size, T, embedding_size)
+        output = self.transformer_encoder(embeddings_pos)
+
+        return output
+
+
+#implemnetation of recurrent embedding - probably not needed but not sure
+
+
+# class recurrent(nn.Module):
+#     """
+#     Implementation of a recurrent module for processing Assignment matrices.
+#     Handles variable-length sequences using padding and packing.
+#     """
+#
+#     def __init__(self, input_size, embedding_size, hidden_size, dropout, num_layers):
+#         super(recurrent, self).__init__()
+#
+#         # Initial projection of the flattened N x N matrix into an embedding space
+#         self.assignment_encoder = nn.Sequential(
+#             nn.Linear(input_size, embedding_size),
+#             nn.ReLU()
+#         )
+#
+#         # GRU module with batch_first=True (Batch, Seq, Feature)
+#         self.gru = nn.GRU(
+#             embedding_size,
+#             hidden_size,
+#             num_layers=num_layers,
+#             batch_first=True,
+#             dropout=dropout if num_layers > 1 else 0.0
+#         )
+#
+#     def forward(self, A_seq, lengths):
+#         """
+#         Args:
+#             A_seq (Tensor): Input sequence of shape (batch_size, T, N, N)
+#             lengths (Tensor): Actual lengths (k) for each sequence in the batch
+#
+#         Returns:
+#             output (Tensor): Full sequence representations (batch_size, T, hidden_size)
+#             final_hidden (Tensor): Aggregated representation from the last real step (batch_size, hidden_size)
+#         """
+#         batch_size, T, N, _ = A_seq.shape
+#
+#         # Flatten the N x N matrices into vectors (shape: batch_size, T, N*N)
+#         A_seq_flat = A_seq.view(batch_size, T, -1)
+#
+#         # Encode each assignment matrix in the sequence
+#         # Shape: (batch_size, T, embedding_size)
+#         raw_embeddings = self.assignment_encoder(A_seq_flat)
+#
+#         # Pack the padded sequence to prevent GRU from processing zero-padding
+#         # lengths must be on CPU for this utility function
+#         lengths_cpu = lengths.cpu() if isinstance(lengths, torch.Tensor) else lengths
+#
+#         embeddings = pack_padded_sequence(
+#             raw_embeddings,
+#             lengths_cpu,
+#             batch_first=True,
+#             enforce_sorted=False
+#         )
+#
+#         # Forward pass through GRU
+#         # packed_output: Internal packed representation
+#         # hidden: Contains the state after the last 'valid' step for each layer
+#         packed_output, hidden = self.gru(embeddings)
+#
+#         # Unpack the sequence back to a regular padded tensor
+#         # Shape: (batch_size, T, hidden_size)
+#         output, _ = pad_packed_sequence(packed_output, batch_first=True, total_length=T)
+#
+#         # Extract the hidden state of the last layer
+#         # from step 'k' into this hidden tensor.
+#         # Shape: (batch_size, hidden_size)
+#         final_hidden = hidden[-1]
+#
+#         return output, final_hidden
 
 
 class gcn(nn.Module):
