@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 import sys
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
+
 
 
 class nconv(nn.Module):
@@ -37,6 +39,126 @@ class linear(nn.Module):
 
     def forward(self, x):
         return self.mlp(x)
+
+
+class fuse(nn.Module):
+    """
+    function that combines representation of Q from wavenet with Assignments representation
+    """
+    def __init__(self, dim_Q, dim_A, output_dim, method = 'concatenate'):
+        super(fuse, self).__init__()
+        self.method = method
+
+        if self.method == 'concatenate':
+            self.mlp = nn.Sequential(nn.Linear(dim_Q + dim_A, output_dim), nn.ReLU())
+
+        elif self.method == 'Hadamard':
+            self.proj_Q = nn.Linear(dim_Q, output_dim)  #this is probably the same
+            self.proj_A = nn.Linear(dim_A, output_dim)  #this can be different in theory
+
+        elif self.method == 'Attention':
+            self. K = nn.Linear(dim_A, output_dim) #keys
+            self. Q = nn.Linear(dim_Q, output_dim) #queries
+
+            self.attention = nn.MultiheadAttention(embed_dim = output_dim, num_heads = 2, batch_first = True)
+
+
+
+
+    def forward(self, Q, A):
+
+        if self.method == 'concatenate':
+            fused = torch.cat([Q,A], dim=-1)
+            output = self.mlp(fused)
+
+        elif self.method == 'Hadamard':
+            q = self.proj_Q(Q)
+            a = self.proj_A(A)
+            output = q * a
+
+        elif self.method == 'Attention':
+            queries = self.Q(Q)
+            keys = self.K(A)
+            values = keys
+
+            output, _ = self.attention(query = queries, kay = keys, values = values)
+
+
+
+        return output
+
+
+
+
+class recurrent(nn.Module):
+    """
+    Implementation of a recurrent module for processing Assignment matrices.
+    Handles variable-length sequences using padding and packing.
+    """
+
+    def __init__(self, input_size, embedding_size, hidden_size, dropout, num_layers):
+        super(recurrent, self).__init__()
+
+        # Initial projection of the flattened N x N matrix into an embedding space
+        self.assignment_encoder = nn.Sequential(
+            nn.Linear(input_size, embedding_size),
+            nn.ReLU()
+        )
+
+        # GRU module with batch_first=True (Batch, Seq, Feature)
+        self.gru = nn.GRU(
+            embedding_size,
+            hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0.0
+        )
+
+    def forward(self, A_seq, lengths):
+        """
+        Args:
+            A_seq (Tensor): Input sequence of shape (batch_size, T, N, N)
+            lengths (Tensor): Actual lengths (k) for each sequence in the batch
+
+        Returns:
+            output (Tensor): Full sequence representations (batch_size, T, hidden_size)
+            final_hidden (Tensor): Aggregated representation from the last real step (batch_size, hidden_size)
+        """
+        batch_size, T, N, _ = A_seq.shape
+
+        # Flatten the N x N matrices into vectors (shape: batch_size, T, N*N)
+        A_seq_flat = A_seq.view(batch_size, T, -1)
+
+        # Encode each assignment matrix in the sequence
+        # Shape: (batch_size, T, embedding_size)
+        raw_embeddings = self.assignment_encoder(A_seq_flat)
+
+        # Pack the padded sequence to prevent GRU from processing zero-padding
+        # lengths must be on CPU for this utility function
+        lengths_cpu = lengths.cpu() if isinstance(lengths, torch.Tensor) else lengths
+
+        embeddings = pack_padded_sequence(
+            raw_embeddings,
+            lengths_cpu,
+            batch_first=True,
+            enforce_sorted=False
+        )
+
+        # Forward pass through GRU
+        # packed_output: Internal packed representation
+        # hidden: Contains the state after the last 'valid' step for each layer
+        packed_output, hidden = self.gru(embeddings)
+
+        # Unpack the sequence back to a regular padded tensor
+        # Shape: (batch_size, T, hidden_size)
+        output, _ = pad_packed_sequence(packed_output, batch_first=True, total_length=T)
+
+        # Extract the hidden state of the last layer
+        # from step 'k' into this hidden tensor.
+        # Shape: (batch_size, hidden_size)
+        final_hidden = hidden[-1]
+
+        return output, final_hidden
 
 
 class gcn(nn.Module):
