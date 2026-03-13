@@ -1,1 +1,5 @@
 *.npy
+slurm*.out
+garage/*
+__pycache__/*
+*.sh
