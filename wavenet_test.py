@@ -151,8 +151,10 @@ def main():
 
 # training execution
 if __name__ == "__main__":
-     run_wavenet_training()
+    # job_id = os.environ.get("SLURM_JOB_ID", datetime.now().strftime("%Y%m%d_%H%M%S"))
 
-# training statistics execution
-if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1:
+        # statistical analysis if csv path
+        main()
+    else:
+        run_wavenet_training()
