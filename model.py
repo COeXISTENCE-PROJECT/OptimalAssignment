@@ -420,6 +420,7 @@ class gwnet(nn.Module):
         self.receptive_field = receptive_field
 
     def forward(self, input):
+
         in_len = input.size(3)
 
         # Pad input if the sequence is shorter than the receptive field
@@ -471,9 +472,12 @@ class gwnet(nn.Module):
             # Spatial processing (GCN)
             if self.gcn_bool and self.supports is not None:
                 if self.addaptadj:
-                    x = self.gconv[i](x, new_supports)
+                    for j, a in enumerate(new_supports):
+                        x = self.gconv[i](x, new_supports)
                 else:
-                    x = self.gconv[i](x, self.supports)
+                    for j, a in enumerate(self.supports):
+
+                        x = self.gconv[i](x, self.supports)
             else:
                 x = self.residual_convs[i](x)
 

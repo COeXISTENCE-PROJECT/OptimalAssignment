@@ -50,6 +50,7 @@ def main():
     scaler = dataloader['scaler']
     supports = [torch.tensor(i).to(device) for i in adj_mx]
 
+
     print(args)
 
     if args.randomadj:
@@ -63,6 +64,8 @@ def main():
     engine = Trainer(scaler, args.in_dim, args.seq_length, args.num_nodes, args.nhid, args.dropout,
                      args.learning_rate, args.weight_decay, device, supports, args.gcn_bool, args.addaptadj,
                      adjinit, args.kernel_size, args.blocks, args.layers)
+
+
 
     print("start training...", flush=True)
 

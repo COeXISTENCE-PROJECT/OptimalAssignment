@@ -28,13 +28,19 @@ def run_wavenet_training():
     model_save_prefix = os.path.join(save_dir, "model")
 
     # Input tensor and topology parameters
-    num_nodes = "770"
+    num_nodes = "1430"
     in_dim = "1"
     seq_length = "12"
     epochs = "2"
     batch_size = "64"
     learning_rate = "0.001"
     nhid = "32"  #number of hidded dimentions
+
+    # b, k, l have to satisfy the equation for time window size and receptive field
+    # T =< R = 1 + b * (k-1)*(2^l -1)
+    kernel = "2"
+    blocks = "4"
+    layers = "2"
 
     # Define arguments as a list of strings
     command = [
@@ -47,15 +53,16 @@ def run_wavenet_training():
         "--in_dim", in_dim,
         "--seq_length", seq_length,    #to check
         "--nhid", nhid,
-        "--addaptadj",
+        "--gcn_bool",
+        #"--addaptadj",
         "--epochs", epochs,
         "--print_every", "10",
         "--batch_size", batch_size,
         "--learning_rate", learning_rate,
         "--save", model_save_prefix,
-        "--kernel_size", "2",
-        "--blocks", "4",
-        "--layers", "2"
+        "--kernel_size", kernel,
+        "--blocks", blocks,
+        "--layers", layers
     ]
 
     print(f"Starting experiment (ID: {job_id})")

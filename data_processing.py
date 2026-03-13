@@ -18,8 +18,24 @@ def create_spatial_adjacency_matrix(data_path, output_path, sigma=None, epsilon=
     """
     df = pd.read_csv(data_path, index_col=0)
 
+    print("=" * 80)
+    print("DEBUG: create_spatial_adjacency_matrix")
+    print("data_path:", data_path)
+    print("output_path:", output_path)
+    print("df shape:", df.shape)
+    print("number of rows (nodes):", len(df))
+    print("index unique:", df.index.is_unique)
+    print("duplicated index count:", df.index.duplicated().sum())
+    print("first 5 node ids:", df.index[:5].tolist())
+    print("last 5 node ids:", df.index[-5:].tolist())
+    print("columns[:10]:", df.columns[:10].tolist())
+    print("=" * 80)
+
     # Extract coordinates
     coords = df[['coord_x', 'coord_y']].values
+
+    print("coords shape:", coords.shape)
+    print("first 5 coords:", coords[:5])
 
     # Calculate symmetric Euclidean distance matrix
     dist_matrix = squareform(pdist(coords, metric='euclidean'))
@@ -45,6 +61,11 @@ def create_spatial_adjacency_matrix(data_path, output_path, sigma=None, epsilon=
 
     print(f"Number of nodes |V|: {A.shape[0]}")
     print(f"Number of edges |E| (non-zero elements): {np.count_nonzero(A)}")
+
+    print("adjacency shape:", adj_df.shape)
+    print("adjacency first 5 index:", adj_df.index[:5].tolist())
+    print("adjacency first 5 columns:", adj_df.columns[:5].tolist())
+    print("=" * 80)
 
     return adj_df
 
@@ -105,14 +126,33 @@ def compile_sumo_temporal_tensor(file_pattern: str, output_filename: str = "traf
     for path in filepaths:
         df = pd.read_csv(path, index_col=0)
 
+        print("=" * 80)
+        print("DEBUG: compile_sumo_temporal_tensor")
+        print("current file:", path)
+        print("df shape:", df.shape)
+        print("rows (nodes):", len(df))
+        print("index unique:", df.index.is_unique)
+        print("duplicated index count:", df.index.duplicated().sum())
+        print("first 5 node ids:", df.index[:5].tolist())
+        print("last 5 node ids:", df.index[-5:].tolist())
+
         # Ensure consistent node ordering
         if canonical_nodes is None:
             canonical_nodes = df.index
         else:
             df = df.reindex(canonical_nodes)
 
+        print("canonical_nodes length:", len(canonical_nodes))
+        print("df shape after reindex:", df.shape)
+        missing_after_reindex = df[step_columns].isna().any(axis=1).sum()
+        print("rows with NaNs after reindex:", missing_after_reindex)
+        print("=" * 80)
+
         # Extract time steps
         step_columns = [col for col in df.columns if col.startswith('Step ')]
+        print("number of step columns:", len(step_columns))
+        print("first 5 step columns:", step_columns[:5])
+        print("last 5 step columns:", step_columns[-5:])
         X_ep = df[step_columns].values
 
         # Reshape to (T, N, C) structure
@@ -135,6 +175,12 @@ def compile_sumo_temporal_tensor(file_pattern: str, output_filename: str = "traf
         nodes=canonical_nodes.values
     )
     print(f"Saved clean dataset to: {output_filename}")
+
+    print("=" * 80)
+    print("FINAL TENSOR SHAPE:", X_full.shape)
+    print("FINAL NODES LENGTH:", len(canonical_nodes))
+    print("first 10 canonical nodes:", canonical_nodes[:10].tolist())
+    print("=" * 80)
 
     return X_full, canonical_nodes
 
@@ -178,7 +224,10 @@ def generate_wavenet_tensors(
     Generates input windows X_out (S x T_in x N x C) and target windows Y_out (S x T_out x N x C).
     """
     T, N, C = X.shape
-    print(f"Input tensor X dimensions: T={T}, N={N}, C={C}")
+    print("=" * 80)
+    print("DEBUG: generate_wavenet_tensors")
+    print("T, N, C =", T, N, C)
+    print("=" * 80)
 
     # Define relative time offsets
     x_offsets = np.sort(np.arange(-(seq_length_x - 1), 1, 1))
