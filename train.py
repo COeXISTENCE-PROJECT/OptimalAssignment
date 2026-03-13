@@ -151,11 +151,12 @@ def main():
     #collecting and saving training data
 
     save_dir = os.path.dirname(os.path.abspath(args.save))
-    os.makedirs(save_dir, exist_ok=True)
+    data_out_dir = os.path.join(save_dir, "data")
+    os.makedirs(data_out_dir, exist_ok=True)
 
     # save to csv
     df_metrics = pd.DataFrame(history)
-    csv_path = os.path.join(save_dir, "data/training_metrics.csv")
+    csv_path = os.path.join(data_out_dir, "data/training_metrics.csv")
     df_metrics.to_csv(csv_path, index=False)
     print(f"Statistics saved to: {csv_path}")
 
@@ -188,7 +189,7 @@ def main():
     axes[2].grid(True, linestyle='--', alpha=0.7)
 
     plt.tight_layout()
-    plot_path = os.path.join(save_dir, "data/learning_curves.png")
+    plot_path = os.path.join(data_out_dir, "data/learning_curves.png")
     plt.savefig(plot_path, dpi=300)
     plt.close()
     print(f"saved learning curves to: {plot_path}")
