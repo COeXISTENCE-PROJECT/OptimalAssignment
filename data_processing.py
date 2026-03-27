@@ -34,7 +34,7 @@ def infer_dataset_name_from_file(file_path: Path) -> str:
     """
     Fallback naming if CSV files are placed directly in networks/ instead of subfolders.
     Example:
-    traffic_heatmap_data_ep1(in).csv -> traffic_heatmap_data
+    traffic_heatmap_data_ep1(in).csv -> ingolstadt_770
     """
     stem = file_path.stem
     stem = re.sub(r"_?ep\d+(\([^)]*\))?$", "", stem, flags=re.IGNORECASE)

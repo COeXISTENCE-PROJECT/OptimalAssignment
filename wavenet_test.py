@@ -1,34 +1,71 @@
-import argparse
+import json
 import os
 import subprocess
 import sys
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pandas as pd
 
 
-def find_available_datasets(processed_root: Path) -> list[str]:
-    """
-    Return dataset names that contain the required Graph WaveNet files.
-    """
-    if not processed_root.exists():
-        return []
+# =========================
+# KONFIGURACJA TRENINGU
+# =========================
 
-    datasets = []
+@dataclass
+class TrainingConfig:
+    # co trenujemy
+    dataset_name: str
 
-    for dataset_dir in sorted(p for p in processed_root.iterdir() if p.is_dir()):
-        train_path = dataset_dir / "train.npz"
-        val_path = dataset_dir / "val.npz"
-        test_path = dataset_dir / "test.npz"
-        adj_path = dataset_dir / "adjacency_matrices" / "adjacency_spatial.csv"
+    # ścieżki
+    base_dir: Path
+    processed_root: Path
+    garage_root: Path
 
-        if train_path.exists() and val_path.exists() and test_path.exists() and adj_path.exists():
-            datasets.append(dataset_dir.name)
+    # środowisko / uruchomienie
+    device: str = "cpu"
+    python_executable: str = sys.executable
+    train_script_name: str = "train.py"
 
-    return datasets
+    # hiperparametry
+    epochs: int = 2
+    batch_size: int = 64
+    learning_rate: float = 0.001
+    nhid: int = 32
+    kernel_size: int = 2
+    blocks: int = 4
+    layers: int = 2
+    print_every: int = 10
 
+    # opcje modelu
+    use_gcn: bool = True
+    addaptadj: bool = False
+
+    # organizacja eksperymentu
+    run_name: Optional[str] = None
+
+    def resolved_base_dir(self) -> Path:
+        return self.base_dir.resolve()
+
+    def resolved_processed_root(self) -> Path:
+        return self.processed_root.resolve()
+
+    def resolved_garage_root(self) -> Path:
+        return self.garage_root.resolve()
+
+    def train_script_path(self) -> Path:
+        return self.resolved_base_dir() / self.train_script_name
+
+    def dataset_dir(self) -> Path:
+        return self.resolved_processed_root() / self.dataset_name
+
+
+# =========================
+# NARZĘDZIA
+# =========================
 
 def load_dataset_metadata(dataset_dir: Path) -> dict:
     """
@@ -60,156 +97,175 @@ def load_dataset_metadata(dataset_dir: Path) -> dict:
         "seq_length": seq_length,
         "num_nodes": num_nodes,
         "in_dim": in_dim,
-        "adj_path": adj_path,
-        "data_dir": dataset_dir,
+        "adj_path": adj_path.resolve(),
+        "data_dir": dataset_dir.resolve(),
     }
 
 
-def run_single_wavenet_training(
-    dataset_name: str,
-    base_dir: Path,
-    processed_root: Path,
-    garage_root: Path,
-    device: str = "cpu",
-    epochs: int = 2,
-    batch_size: int = 64,
-    learning_rate: float = 0.001,
-    nhid: int = 32,
-    kernel_size: int = 2,
-    blocks: int = 4,
-    layers: int = 2,
-    print_every: int = 10,
-    use_gcn: bool = True,
-    addaptadj: bool = False,
-) -> None:
-    """
-    Run Graph WaveNet training for one dataset.
-    """
-    dataset_dir = processed_root / dataset_name
+def validate_config(config: TrainingConfig) -> None:
+    if not config.dataset_name:
+        raise ValueError("dataset_name cannot be empty.")
 
-    if not dataset_dir.exists():
-        raise FileNotFoundError(f"Dataset directory does not exist: {dataset_dir}")
+    if config.epochs <= 0:
+        raise ValueError("epochs must be > 0.")
 
-    metadata = load_dataset_metadata(dataset_dir)
+    if config.batch_size <= 0:
+        raise ValueError("batch_size must be > 0.")
 
-    job_id = os.environ.get("SLURM_JOB_ID", datetime.now().strftime("%Y%m%d_%H%M%S"))
-    save_dir = garage_root / dataset_name / f"experiment_{job_id}"
-    save_dir.mkdir(parents=True, exist_ok=True)
+    if config.learning_rate <= 0:
+        raise ValueError("learning_rate must be > 0.")
 
-    model_save_prefix = save_dir / "model"
-    train_script = base_dir / "train.py"
+    if config.nhid <= 0:
+        raise ValueError("nhid must be > 0.")
 
+    if config.kernel_size <= 0:
+        raise ValueError("kernel_size must be > 0.")
+
+    if config.blocks <= 0:
+        raise ValueError("blocks must be > 0.")
+
+    if config.layers <= 0:
+        raise ValueError("layers must be > 0.")
+
+    train_script = config.train_script_path()
     if not train_script.exists():
         raise FileNotFoundError(f"train.py not found: {train_script}")
 
+    dataset_dir = config.dataset_dir()
+    if not dataset_dir.exists():
+        raise FileNotFoundError(f"Dataset directory does not exist: {dataset_dir}")
+
+
+def build_training_command(config: TrainingConfig, metadata: dict, model_save_prefix: Path) -> list[str]:
     command = [
-        sys.executable,
-        str(train_script),
-        "--device", str(device),
+        config.python_executable,
+        str(config.train_script_path()),
+        "--device", str(config.device),
         "--data", str(metadata["data_dir"]),
         "--adjdata", str(metadata["adj_path"]),
         "--adjtype", "doubletransition",
         "--num_nodes", str(metadata["num_nodes"]),
         "--in_dim", str(metadata["in_dim"]),
         "--seq_length", str(metadata["seq_length"]),
-        "--nhid", str(nhid),
-        "--epochs", str(epochs),
-        "--print_every", str(print_every),
-        "--batch_size", str(batch_size),
-        "--learning_rate", str(learning_rate),
+        "--nhid", str(config.nhid),
+        "--epochs", str(config.epochs),
+        "--print_every", str(config.print_every),
+        "--batch_size", str(config.batch_size),
+        "--learning_rate", str(config.learning_rate),
         "--save", str(model_save_prefix),
-        "--kernel_size", str(kernel_size),
-        "--blocks", str(blocks),
-        "--layers", str(layers),
+        "--kernel_size", str(config.kernel_size),
+        "--blocks", str(config.blocks),
+        "--layers", str(config.layers),
     ]
 
-    if use_gcn:
+    if config.use_gcn:
         command.append("--gcn_bool")
 
-    if addaptadj:
+    if config.addaptadj:
         command.append("--addaptadj")
 
-    print("=" * 90)
-    print(f"Starting training for dataset: {dataset_name}")
+    return command
+
+
+def _make_json_safe_dict(config: TrainingConfig) -> dict:
+    raw = asdict(config)
+    safe = {}
+    for key, value in raw.items():
+        if isinstance(value, Path):
+            safe[key] = str(value)
+        else:
+            safe[key] = value
+    return safe
+
+
+def run_training(config: TrainingConfig) -> Path:
+    """
+    Main entrypoint for training exactly one dataset.
+    Returns path to the created experiment directory.
+    """
+    validate_config(config)
+
+    metadata = load_dataset_metadata(config.dataset_dir())
+
+    job_id = os.environ.get("SLURM_JOB_ID", datetime.now().strftime("%Y%m%d_%H%M%S"))
+    run_suffix = config.run_name if config.run_name else f"experiment_{job_id}"
+
+    save_dir = config.resolved_garage_root() / config.dataset_name / run_suffix
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    model_save_prefix = save_dir / "model"
+    command = build_training_command(config, metadata, model_save_prefix)
+
+    # zapis konfiguracji i komendy - bardzo przydatne na chmurze
+    with open(save_dir / "config.json", "w", encoding="utf-8") as f:
+        json.dump(_make_json_safe_dict(config), f, indent=2, ensure_ascii=False)
+
+    with open(save_dir / "resolved_dataset_metadata.json", "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "seq_length": metadata["seq_length"],
+                "num_nodes": metadata["num_nodes"],
+                "in_dim": metadata["in_dim"],
+                "adj_path": str(metadata["adj_path"]),
+                "data_dir": str(metadata["data_dir"]),
+            },
+            f,
+            indent=2,
+            ensure_ascii=False,
+        )
+
+    with open(save_dir / "command.sh", "w", encoding="utf-8") as f:
+        f.write(" ".join(map(str, command)) + "\n")
+
+    print("=" * 100)
+    print(f"Starting training for dataset: {config.dataset_name}")
     print(f"Data directory: {metadata['data_dir']}")
     print(f"Adjacency path: {metadata['adj_path']}")
-    print(f"num_nodes={metadata['num_nodes']}, in_dim={metadata['in_dim']}, seq_length={metadata['seq_length']}")
+    print(
+        f"num_nodes={metadata['num_nodes']}, "
+        f"in_dim={metadata['in_dim']}, "
+        f"seq_length={metadata['seq_length']}"
+    )
     print(f"Save directory: {save_dir}")
-    print("=" * 90)
+    print("=" * 100)
 
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        cwd=str(base_dir),
+        cwd=str(config.resolved_base_dir()),
+        bufsize=1,
     )
 
-    for line in process.stdout:
-        print(line, end="")
+    if process.stdout is None:
+        raise RuntimeError("Failed to capture training process stdout.")
+
+    log_file = save_dir / "train.log"
+    with open(log_file, "w", encoding="utf-8") as log:
+        for line in process.stdout:
+            print(line, end="")
+            log.write(line)
 
     process.wait()
 
-    if process.returncode == 0:
-        print(f"Training completed successfully for dataset: {dataset_name}")
-    else:
-        print(f"Error while training dataset {dataset_name}. Exit code: {process.returncode}")
-
-
-def run_wavenet_training_for_all(
-    base_dir: Path,
-    processed_root: Path,
-    garage_root: Path,
-    device: str = "cpu",
-    epochs: int = 2,
-    batch_size: int = 64,
-    learning_rate: float = 0.001,
-    nhid: int = 32,
-    kernel_size: int = 2,
-    blocks: int = 4,
-    layers: int = 2,
-    print_every: int = 10,
-    use_gcn: bool = True,
-    addaptadj: bool = False,
-) -> None:
-    """
-    Run Graph WaveNet training for every dataset found in processed_networks.
-    """
-    datasets = find_available_datasets(processed_root)
-
-    if not datasets:
-        raise ValueError(
-            f"No valid datasets found in: {processed_root}\n"
-            "Expected structure:\n"
-            "processed_networks/<dataset>/train.npz\n"
-            "processed_networks/<dataset>/val.npz\n"
-            "processed_networks/<dataset>/test.npz\n"
-            "processed_networks/<dataset>/adjacency_matrices/adjacency_spatial.csv"
+    if process.returncode != 0:
+        raise RuntimeError(
+            f"Training failed for dataset {config.dataset_name}. "
+            f"Exit code: {process.returncode}. "
+            f"See log: {log_file}"
         )
 
-    print(f"Found {len(datasets)} dataset(s): {datasets}")
-
-    for dataset_name in datasets:
-        run_single_wavenet_training(
-            dataset_name=dataset_name,
-            base_dir=base_dir,
-            processed_root=processed_root,
-            garage_root=garage_root,
-            device=device,
-            epochs=epochs,
-            batch_size=batch_size,
-            learning_rate=learning_rate,
-            nhid=nhid,
-            kernel_size=kernel_size,
-            blocks=blocks,
-            layers=layers,
-            print_every=print_every,
-            use_gcn=use_gcn,
-            addaptadj=addaptadj,
-        )
+    print(f"\nTraining completed successfully for dataset: {config.dataset_name}")
+    print(f"Logs and artifacts saved in: {save_dir}")
+    return save_dir
 
 
-def analyze_training_csv(csv_path: str) -> None:
+# =========================
+# ANALIZA CSV
+# =========================
+
+def analyze_training_csv(csv_path: str | Path) -> None:
     """
     Analyze training_metrics.csv.
     """
@@ -282,91 +338,37 @@ def analyze_training_csv(csv_path: str) -> None:
     print("=" * 60)
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Graph WaveNet training and metrics analysis")
-
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    train_parser = subparsers.add_parser("train", help="Run training for one dataset or all datasets")
-    train_parser.add_argument("--dataset", type=str, default=None, help="Dataset name, e.g. ingolstadt_770")
-    train_parser.add_argument("--all", action="store_true", help="Train on all datasets in processed_networks")
-    train_parser.add_argument("--processed-root", type=str, default="data/processed_networks")
-    train_parser.add_argument("--garage-root", type=str, default="garage")
-    train_parser.add_argument("--device", type=str, default="cpu")
-    train_parser.add_argument("--epochs", type=int, default=2)
-    train_parser.add_argument("--batch-size", type=int, default=64)
-    train_parser.add_argument("--learning-rate", type=float, default=0.001)
-    train_parser.add_argument("--nhid", type=int, default=32)
-    train_parser.add_argument("--kernel-size", type=int, default=2)
-    train_parser.add_argument("--blocks", type=int, default=4)
-    train_parser.add_argument("--layers", type=int, default=2)
-    train_parser.add_argument("--print-every", type=int, default=10)
-    train_parser.add_argument("--no-gcn", action="store_true", help="Disable --gcn_bool")
-    train_parser.add_argument("--addaptadj", action="store_true", help="Enable adaptive adjacency")
-
-    analyze_parser = subparsers.add_parser("analyze", help="Analyze training_metrics.csv")
-    analyze_parser.add_argument("csv_path", type=str, help="Path to training_metrics.csv")
-
-    return parser
-
-
-def main():
-    parser = build_parser()
-    args = parser.parse_args()
-
-    base_dir = Path(__file__).resolve().parent
-    processed_root = (base_dir / args.processed_root).resolve() if hasattr(args, "processed_root") else None
-    garage_root = (base_dir / args.garage_root).resolve() if hasattr(args, "garage_root") else None
-
-    if args.command == "analyze":
-        analyze_training_csv(args.csv_path)
-        return
-
-    if args.command == "train":
-        if args.all and args.dataset is not None:
-            parser.error("Use either --dataset <name> or --all, not both.")
-
-        if not args.all and args.dataset is None:
-            parser.error("For training, provide either --dataset <name> or --all.")
-
-        use_gcn = not args.no_gcn
-
-        if args.all:
-            run_wavenet_training_for_all(
-                base_dir=base_dir,
-                processed_root=processed_root,
-                garage_root=garage_root,
-                device=args.device,
-                epochs=args.epochs,
-                batch_size=args.batch_size,
-                learning_rate=args.learning_rate,
-                nhid=args.nhid,
-                kernel_size=args.kernel_size,
-                blocks=args.blocks,
-                layers=args.layers,
-                print_every=args.print_every,
-                use_gcn=use_gcn,
-                addaptadj=args.addaptadj,
-            )
-        else:
-            run_single_wavenet_training(
-                dataset_name=args.dataset,
-                base_dir=base_dir,
-                processed_root=processed_root,
-                garage_root=garage_root,
-                device=args.device,
-                epochs=args.epochs,
-                batch_size=args.batch_size,
-                learning_rate=args.learning_rate,
-                nhid=args.nhid,
-                kernel_size=args.kernel_size,
-                blocks=args.blocks,
-                layers=args.layers,
-                print_every=args.print_every,
-                use_gcn=use_gcn,
-                addaptadj=args.addaptadj,
-            )
-
+# =========================
+# PRZYKŁADOWE UŻYCIE
+# =========================
 
 if __name__ == "__main__":
-    main()
+    BASE_DIR = Path(__file__).resolve().parent
+
+    config = TrainingConfig(
+        dataset_name="ingolstadt_770",
+
+        base_dir=BASE_DIR,
+        processed_root=BASE_DIR / "data" / "processed_networks",
+        garage_root=BASE_DIR / "garage",
+
+        device="cpu",       # albo "cpu"
+        epochs=1,
+        batch_size=64,
+        learning_rate=0.001,
+        nhid=32,
+        kernel_size=2,
+        blocks=4,
+        layers=2,
+        print_every=10,
+        use_gcn=True,
+        addaptadj=False,
+
+        # opcjonalnie własna nazwa runa:
+        # run_name="test_run_01",
+    )
+
+    run_training(config)
+
+    # przykład analizy po treningu:
+    # analyze_training_csv(BASE_DIR / "garage" / "ingolstadt_770" / "experiment_xxx" / "training_metrics.csv")
