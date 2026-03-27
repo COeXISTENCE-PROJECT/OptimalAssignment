@@ -4,8 +4,10 @@ import os
 import subprocess
 import sys
 from datetime import datetime
-from typing import Dict, List, Any, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
+import numpy as np
 import pandas as pd
 
 
@@ -13,18 +15,70 @@ def receptive_field(kernel_size: int, blocks: int, layers: int) -> int:
     """
     Approximate receptive field used in Graph WaveNet-like temporal stack:
     R = 1 + b * (k - 1) * (2^l - 1)
-
-    where:
-      b = blocks
-      k = kernel_size
-      l = layers
     """
     return 1 + blocks * (kernel_size - 1) * (2 ** layers - 1)
 
 
+def find_available_datasets(processed_root: Path) -> List[str]:
+    """
+    Return dataset names that contain the required Graph WaveNet files.
+    """
+    if not processed_root.exists():
+        return []
+
+    datasets = []
+
+    for dataset_dir in sorted(p for p in processed_root.iterdir() if p.is_dir()):
+        train_path = dataset_dir / "train.npz"
+        val_path = dataset_dir / "val.npz"
+        test_path = dataset_dir / "test.npz"
+        adj_path = dataset_dir / "adjacency_matrices" / "adjacency_spatial.csv"
+
+        if train_path.exists() and val_path.exists() and test_path.exists() and adj_path.exists():
+            datasets.append(dataset_dir.name)
+
+    return datasets
+
+
+def load_dataset_metadata(dataset_dir: Path) -> Dict[str, Any]:
+    """
+    Read dataset dimensions directly from train.npz.
+    Expected x shape: (samples, seq_len, num_nodes, in_dim)
+    """
+    train_path = dataset_dir / "train.npz"
+    adj_path = dataset_dir / "adjacency_matrices" / "adjacency_spatial.csv"
+
+    if not train_path.exists():
+        raise FileNotFoundError(f"Missing file: {train_path}")
+
+    if not adj_path.exists():
+        raise FileNotFoundError(f"Missing file: {adj_path}")
+
+    with np.load(train_path) as data:
+        x = data["x"]
+
+        if x.ndim != 4:
+            raise ValueError(
+                f"Unexpected x shape in {train_path}: {x.shape}. "
+                "Expected (samples, seq_len, num_nodes, in_dim)."
+            )
+
+        seq_length = int(x.shape[1])
+        num_nodes = int(x.shape[2])
+        in_dim = int(x.shape[3])
+
+    return {
+        "data_dir": dataset_dir,
+        "adj_path": adj_path,
+        "seq_length": seq_length,
+        "num_nodes": num_nodes,
+        "in_dim": in_dim,
+    }
+
+
 def build_command(
-    base_dir: str,
-    save_prefix: str,
+    base_dir: Path,
+    save_prefix: Path,
     config: Dict[str, Any],
 ) -> List[str]:
     """
@@ -32,7 +86,7 @@ def build_command(
     """
     command = [
         sys.executable,
-        os.path.join(base_dir, "train.py"),
+        str(base_dir / "train.py"),
         "--device", str(config["device"]),
         "--data", str(config["data"]),
         "--adjdata", str(config["adjdata"]),
@@ -47,13 +101,12 @@ def build_command(
         "--learning_rate", str(config["learning_rate"]),
         "--dropout", str(config["dropout"]),
         "--weight_decay", str(config["weight_decay"]),
-        "--save", save_prefix,
+        "--save", str(save_prefix),
         "--kernel_size", str(config["kernel_size"]),
         "--blocks", str(config["blocks"]),
         "--layers", str(config["layers"]),
     ]
 
-    # Boolean flags
     if config.get("gcn_bool", False):
         command.append("--gcn_bool")
     if config.get("aptonly", False):
@@ -66,11 +119,11 @@ def build_command(
     return command
 
 
-def summarize_training_csv(csv_path: str) -> Optional[Dict[str, Any]]:
+def summarize_training_csv(csv_path: Path) -> Optional[Dict[str, Any]]:
     """
-    Read training_metrics.csv and extract the best metrics.
+    Read training_metrics.csv and extract best metrics.
     """
-    if not os.path.exists(csv_path):
+    if not csv_path.exists():
         return None
 
     try:
@@ -79,9 +132,15 @@ def summarize_training_csv(csv_path: str) -> Optional[Dict[str, Any]]:
         return {"status": f"csv_read_error: {e}"}
 
     required_columns = [
-        "epoch", "train_loss", "valid_loss",
-        "valid_rmse", "valid_mape", "train_time", "val_time"
+        "epoch",
+        "train_loss",
+        "valid_loss",
+        "valid_rmse",
+        "valid_mape",
+        "train_time",
+        "val_time",
     ]
+
     if not all(col in df.columns for col in required_columns):
         return {"status": "csv_missing_columns"}
 
@@ -92,6 +151,7 @@ def summarize_training_csv(csv_path: str) -> Optional[Dict[str, Any]]:
     best_valid_loss = float(df.loc[best_loss_idx, "valid_loss"])
     best_valid_rmse = float(df.loc[best_rmse_idx, "valid_rmse"])
     best_valid_mape = float(df.loc[best_mape_idx, "valid_mape"])
+
     best_epoch_loss = int(df.loc[best_loss_idx, "epoch"])
     best_epoch_rmse = int(df.loc[best_rmse_idx, "epoch"])
     best_epoch_mape = int(df.loc[best_mape_idx, "epoch"])
@@ -104,6 +164,7 @@ def summarize_training_csv(csv_path: str) -> Optional[Dict[str, Any]]:
     mean_epoch_time = float(df["train_time"].mean())
 
     return {
+        "status": "ok",
         "best_valid_loss": best_valid_loss,
         "best_valid_rmse": best_valid_rmse,
         "best_valid_mape": best_valid_mape,
@@ -121,9 +182,8 @@ def summarize_training_csv(csv_path: str) -> Optional[Dict[str, Any]]:
 
 def generate_grid() -> List[Dict[str, Any]]:
     """
-    Define a hyperparameter grid.
+    Define hyperparameter grid.
     """
-
     grid = {
         "learning_rate": [1e-3],
         "batch_size": [32],
@@ -145,8 +205,7 @@ def generate_grid() -> List[Dict[str, Any]]:
     for combo in itertools.product(*values):
         cfg = dict(zip(keys, combo))
 
-        # Sensible constraints:
-        #randomadj only matters if addaptadj=True
+        # randomadj only makes sense if addaptadj=True
         if cfg["randomadj"] and not cfg["addaptadj"]:
             continue
 
@@ -156,8 +215,9 @@ def generate_grid() -> List[Dict[str, Any]]:
 
 
 def run_single_experiment(
-    base_dir: str,
-    experiment_root: str,
+    base_dir: Path,
+    dataset_name: str,
+    experiment_root: Path,
     run_idx: int,
     fixed_config: Dict[str, Any],
     variable_config: Dict[str, Any],
@@ -173,13 +233,13 @@ def run_single_experiment(
         layers=config["layers"],
     )
 
-    # Skip invalid configs where temporal receptive field is too short
     if rf < config["seq_length"]:
         return {
             **config,
+            "dataset": dataset_name,
             "run_idx": run_idx,
             "receptive_field": rf,
-            "status": f"skipped_rf<{config['seq_length']}",
+            "status": f"skipped_rf_lt_seq_length_{config['seq_length']}",
         }
 
     run_name = (
@@ -197,10 +257,10 @@ def run_single_experiment(
         f"_rand{int(config['randomadj'])}"
     )
 
-    save_dir = os.path.join(experiment_root, run_name)
-    os.makedirs(save_dir, exist_ok=True)
+    save_dir = experiment_root / run_name
+    save_dir.mkdir(parents=True, exist_ok=True)
 
-    save_prefix = os.path.join(save_dir, "model")
+    save_prefix = save_dir / "model"
 
     command = build_command(
         base_dir=base_dir,
@@ -209,7 +269,7 @@ def run_single_experiment(
     )
 
     print("=" * 100)
-    print(f"[RUN {run_idx}] {run_name}")
+    print(f"[{dataset_name}] RUN {run_idx}: {run_name}")
     print(f"Save dir: {save_dir}")
     print(f"Receptive field: {rf}")
     print("Command:")
@@ -220,7 +280,8 @@ def run_single_experiment(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True
+        text=True,
+        cwd=str(base_dir),
     )
 
     full_log = []
@@ -230,16 +291,16 @@ def run_single_experiment(
 
     process.wait()
 
-    # Save raw log
-    log_path = os.path.join(save_dir, "train_stdout.log")
+    log_path = save_dir / "train_stdout.log"
     with open(log_path, "w", encoding="utf-8") as f:
         f.writelines(full_log)
 
     result = {
         **config,
+        "dataset": dataset_name,
         "run_idx": run_idx,
         "run_name": run_name,
-        "save_dir": save_dir,
+        "save_dir": str(save_dir),
         "receptive_field": rf,
         "return_code": process.returncode,
     }
@@ -248,8 +309,7 @@ def run_single_experiment(
         result["status"] = f"train_failed_code_{process.returncode}"
         return result
 
-    # Expected metrics file
-    metrics_csv = os.path.join(save_dir, "training_metrics.csv")
+    metrics_csv = save_dir / "training_metrics.csv"
     summary = summarize_training_csv(metrics_csv)
 
     if summary is None:
@@ -257,36 +317,53 @@ def run_single_experiment(
         return result
 
     result.update(summary)
-    result["metrics_csv"] = metrics_csv
+    result["metrics_csv"] = str(metrics_csv)
     return result
 
 
-def run_grid_search():
+def run_grid_search_for_dataset(
+    dataset_name: str,
+    base_dir: Path,
+    processed_root: Path,
+    garage_root: Path,
+    device: str = "cpu",
+    epochs: int = 20,
+    print_every: int = 10,
+    adjtype: str = "doubletransition",
+    aptonly: bool = False,
+) -> None:
     """
-    Main grid-search routine.
+    Run grid search for one dataset.
     """
-    base_dir = os.path.abspath(os.path.dirname(__file__))
+    dataset_dir = processed_root / dataset_name
+    if not dataset_dir.exists():
+        raise FileNotFoundError(f"Dataset directory does not exist: {dataset_dir}")
+
+    metadata = load_dataset_metadata(dataset_dir)
 
     job_id = os.environ.get("SLURM_JOB_ID", datetime.now().strftime("%Y%m%d_%H%M%S"))
+    experiment_root = garage_root / dataset_name / f"gridsearch_{job_id}"
+    experiment_root.mkdir(parents=True, exist_ok=True)
 
-    experiment_root = os.path.join(base_dir, "garage", f"gridsearch_{job_id}")
-    os.makedirs(experiment_root, exist_ok=True)
-
-    # Fixed configuration: dataset / system / general training params
     fixed_config = {
-        "device": "cpu",  # change to e.g. cuda:0 if available
-        "data": os.path.join(base_dir, "data", "WAVENET_READY"),
-        "adjdata": os.path.join(base_dir, "data", "adjacency_matrix.csv"),
-        "adjtype": "doubletransition",
-        "num_nodes": 1430,
-        "in_dim": 1,
-        "seq_length": 12,
-        "epochs": 20,
-        "print_every": 10,
-        "aptonly": False,
+        "device": device,
+        "data": str(metadata["data_dir"]),
+        "adjdata": str(metadata["adj_path"]),
+        "adjtype": adjtype,
+        "num_nodes": metadata["num_nodes"],
+        "in_dim": metadata["in_dim"],
+        "seq_length": metadata["seq_length"],
+        "epochs": epochs,
+        "print_every": print_every,
+        "aptonly": aptonly,
     }
 
     configs = generate_grid()
+
+    print(f"Dataset: {dataset_name}")
+    print(f"Data dir: {metadata['data_dir']}")
+    print(f"Adjacency: {metadata['adj_path']}")
+    print(f"num_nodes={metadata['num_nodes']}, in_dim={metadata['in_dim']}, seq_length={metadata['seq_length']}")
     print(f"Total candidate configurations: {len(configs)}")
     print(f"Experiment root: {experiment_root}")
 
@@ -295,6 +372,7 @@ def run_grid_search():
     for run_idx, variable_config in enumerate(configs, start=1):
         result = run_single_experiment(
             base_dir=base_dir,
+            dataset_name=dataset_name,
             experiment_root=experiment_root,
             run_idx=run_idx,
             fixed_config=fixed_config,
@@ -302,30 +380,31 @@ def run_grid_search():
         )
         all_results.append(result)
 
-        results_df = pd.DataFrame(all_results)
-        results_csv = os.path.join(experiment_root, "grid_results.csv")
-        results_df.to_csv(results_csv, index=False)
+        partial_df = pd.DataFrame(all_results)
+        partial_csv = experiment_root / "grid_results.csv"
+        partial_df.to_csv(partial_csv, index=False)
+        print(f"\n[INFO] Partial results saved to: {partial_csv}\n")
 
-        print(f"\n[INFO] Partial results saved to: {results_csv}\n")
-
-    # Final summary
     results_df = pd.DataFrame(all_results)
 
     if "best_valid_loss" in results_df.columns:
         results_df = results_df.sort_values(
             by=["status", "best_valid_loss"],
             ascending=[True, True],
-            na_position="last"
+            na_position="last",
         )
 
-    final_csv = os.path.join(experiment_root, "grid_results_sorted.csv")
+    final_csv = experiment_root / "grid_results_sorted.csv"
     results_df.to_csv(final_csv, index=False)
 
     print("=" * 100)
-    print("GRID SEARCH FINISHED")
+    print(f"GRID SEARCH FINISHED FOR DATASET: {dataset_name}")
     print(f"Results: {final_csv}")
 
-    successful = results_df[results_df["status"] == "ok"] if "status" in results_df.columns else pd.DataFrame()
+    if "status" in results_df.columns:
+        successful = results_df[results_df["status"] == "ok"]
+    else:
+        successful = pd.DataFrame()
 
     if not successful.empty:
         best = successful.sort_values("best_valid_loss").iloc[0]
@@ -333,8 +412,105 @@ def run_grid_search():
         print(best.to_string())
     else:
         print("\nNo successful runs found.")
+
     print("=" * 100)
 
 
+def run_grid_search_for_all_datasets(
+    base_dir: Path,
+    processed_root: Path,
+    garage_root: Path,
+    device: str = "cpu",
+    epochs: int = 20,
+    print_every: int = 10,
+    adjtype: str = "doubletransition",
+    aptonly: bool = False,
+) -> None:
+    """
+    Run grid search for all datasets found in processed_networks.
+    """
+    datasets = find_available_datasets(processed_root)
+
+    if not datasets:
+        raise ValueError(
+            f"No valid datasets found in: {processed_root}\n"
+            "Expected:\n"
+            "processed_networks/<dataset>/train.npz\n"
+            "processed_networks/<dataset>/val.npz\n"
+            "processed_networks/<dataset>/test.npz\n"
+            "processed_networks/<dataset>/adjacency_matrices/adjacency_spatial.csv"
+        )
+
+    print(f"Found datasets: {datasets}")
+
+    for dataset_name in datasets:
+        run_grid_search_for_dataset(
+            dataset_name=dataset_name,
+            base_dir=base_dir,
+            processed_root=processed_root,
+            garage_root=garage_root,
+            device=device,
+            epochs=epochs,
+            print_every=print_every,
+            adjtype=adjtype,
+            aptonly=aptonly,
+        )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Graph WaveNet grid search for processed datasets")
+
+    parser.add_argument("--dataset", type=str, default=None, help="Dataset name, e.g. ingolstadt_770")
+    parser.add_argument("--all", action="store_true", help="Run grid search for all datasets")
+    parser.add_argument("--processed-root", type=str, default="data/processed_networks")
+    parser.add_argument("--garage-root", type=str, default="garage")
+    parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--print-every", type=int, default=10)
+    parser.add_argument("--adjtype", type=str, default="doubletransition")
+    parser.add_argument("--aptonly", action="store_true")
+
+    return parser
+
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if args.all and args.dataset is not None:
+        parser.error("Use either --dataset <name> or --all, not both.")
+
+    if not args.all and args.dataset is None:
+        parser.error("Provide either --dataset <name> or --all.")
+
+    base_dir = Path(__file__).resolve().parent
+    processed_root = (base_dir / args.processed_root).resolve()
+    garage_root = (base_dir / args.garage_root).resolve()
+
+    if args.all:
+        run_grid_search_for_all_datasets(
+            base_dir=base_dir,
+            processed_root=processed_root,
+            garage_root=garage_root,
+            device=args.device,
+            epochs=args.epochs,
+            print_every=args.print_every,
+            adjtype=args.adjtype,
+            aptonly=args.aptonly,
+        )
+    else:
+        run_grid_search_for_dataset(
+            dataset_name=args.dataset,
+            base_dir=base_dir,
+            processed_root=processed_root,
+            garage_root=garage_root,
+            device=args.device,
+            epochs=args.epochs,
+            print_every=args.print_every,
+            adjtype=args.adjtype,
+            aptonly=args.aptonly,
+        )
+
+
 if __name__ == "__main__":
-    run_grid_search()
+    main()
