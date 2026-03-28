@@ -1,0 +1,85 @@
+import sumolib
+import pandas as pd
+import re
+
+# --- PLIKI WEJŚCIOWE ---
+NEW_NET_PATH = 'ing_sim.net.xml'      # Twoja zredukowana sieć (klucz)
+OLD_NET_PATH = 'ingolstadt_custom.net.xml' 
+CSV_INPUT = 'inglostadt_1033.csv'      # Nowa macierz 1033
+OUTPUT_FILE = 'aggregated_ingolstadt_1033.csv'
+
+def strip_lane(edge_id):
+    """Czyści ID z oznaczeń pasów (_0, _1 itd.)"""
+    edge_id = str(edge_id)
+    if edge_id.startswith(':'):
+        return re.sub(r'_\d+$', '', edge_id)
+    return edge_id.split('_')[0]
+
+def run_aggregation():
+    print("Inicjalizacja sieci...")
+    # Wczytujemy obie sieci, by stworzyć mapowanie przestrzenne
+    old_net = sumolib.net.readNet(OLD_NET_PATH)
+    new_net = sumolib.net.readNet(NEW_NET_PATH)
+    
+    # 1. Tworzymy słownik mapowania: Stary Edge ID -> Nowy Edge ID (w ing_sim)
+    mapping = {}
+    print("Mapowanie krawędzi na podstawie geometrii...")
+    for old_edge in old_net.getEdges():
+        old_id = old_edge.getID()
+        if new_net.hasEdge(old_id):
+            mapping[old_id] = old_id
+        else:
+            # Jeśli krawędź została scalona, szukamy jej 'rodzica' w nowej sieci
+            shape = old_edge.getShape()
+            mid = shape[len(shape)//2]
+            nearby = new_net.getNeighboringEdges(mid[0], mid[1], 5) # 5m tolerancji
+            if nearby:
+                mapping[old_id] = sorted(nearby, key=lambda x: x[1])[0][0].getID()
+
+    # 2. Wczytanie danych flowów
+    print("Wczytywanie macierzy flowów (może to chwilę potrwać przy 1033 krokach)...")
+    df = pd.read_csv(CSV_INPUT)
+    id_col = df.columns[0]
+    
+    # 3. Agregacja
+    # A: Najpierw czyścimy ID pasów
+    df['edge_only'] = df[id_col].apply(strip_lane)
+    
+    # B: Mapujemy na ID z zredukowanej sieci (ing_sim)
+    df['target_id'] = df['edge_only'].map(mapping)
+    
+    # Usuwamy te, których nie ma w nowej sieci (opcjonalne)
+    df = df.dropna(subset=['target_id'])
+    
+    # C: Sumujemy wszystkie kroki (Step 0 do Step 1032)
+    print("Sumowanie przepływów...")
+    step_cols = [c for c in df.columns if 'Step' in c]
+    aggregated_df = df.groupby('target_id')[step_cols].sum().reset_index()
+
+    # 4. Dodanie współrzędnych z nowej sieci (do poprawnej wizualizacji)
+    def get_new_pos(eid):
+        edge = new_net.getEdge(eid)
+        shape = edge.getShape()
+        mid = shape[len(shape)//2]
+        return pd.Series([mid[0], mid[1]])
+
+    print("Aktualizacja współrzędnych dla nowej sieci...")
+    aggregated_df[['coord_x', 'coord_y']] = aggregated_df['target_id'].apply(get_new_pos)
+    
+    # Porządkujemy kolumny
+    cols = ['target_id', 'coord_x', 'coord_y'] + step_cols
+    aggregated_df = aggregated_df[cols]
+
+    # 5. Eksport i generowanie pliku selekcji dla SUMO-GUI
+    aggregated_df.to_csv(OUTPUT_FILE, index=False)
+    
+    with open("selected_edges_1033.txt", "w") as f:
+        for eid in aggregated_df['target_id'].unique():
+            f.write(f"edge:{eid}\n")
+
+    print(f"Sukces! Skonsolidowano dane do {len(aggregated_df)} krawędzi.")
+    print(f"Wynik: {OUTPUT_FILE}")
+    print(f"Plik do SUMO-GUI: selected_edges_1033.txt")
+
+if __name__ == "__main__":
+    run_aggregation()
