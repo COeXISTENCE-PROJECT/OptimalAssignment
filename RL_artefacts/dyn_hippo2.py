@@ -4,7 +4,7 @@ import sys
 # Ensure that the script always runs with the repository root
 # added to PYTHONPATH, regardless of where it is executed from.
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
-repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 

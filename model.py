@@ -129,261 +129,133 @@ class PositionalEncoding(nn.Module):
 
 class PathEncoder(nn.Module):
     """
-    Encodes a single agent path represented as an NxN binary matrix.
-    The same encoder is shared across all agents and all time steps.
+    Encodes a single path represented as an NxN matrix
+    using a 2D convolutional network.
     """
 
-    def __init__(self, n_nodes, path_embedding_dim, hidden_size = None, dropout = 0.0):
+    def __init__(
+        self,
+        n_nodes: int,
+        path_embedding_dim: int,
+        hidden_size: int | None = None,
+        dropout: float = 0.0,
+    ):
         super().__init__()
 
-        input_size = n_nodes * n_nodes
+        self.n_nodes = n_nodes
+        hidden = hidden_size or 64
 
-        if hidden_size is not None:
-            self.encoder = nn.Sequential(
-                nn.Linear(input_size, hidden_size),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(hidden_size, path_embedding_dim),
-                nn.ReLU(),
-            )
-        else:
-            self.encoder = nn.Sequential(
-                nn.Linear(input_size, path_embedding_dim),
-                nn.ReLU(),
-            )
+        self.encoder = nn.Sequential(
+            nn.Conv2d(1, hidden, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+
+            nn.Conv2d(hidden, hidden, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+
+            nn.AdaptiveAvgPool2d((1, 1)),  # (B, hidden, 1, 1)
+            nn.Flatten(),                  # (B, hidden)
+
+            nn.Linear(hidden, path_embedding_dim),
+            nn.ReLU(),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: Tensor of shape (num_agents, N*N)
+            x: Tensor of shape (batch, N, N)
 
         Returns:
-            Tensor of shape (num_agents, path_embedding_dim)
+            Tensor of shape (batch, path_embedding_dim)
         """
+        if x.ndim != 3:
+            raise ValueError(
+                f"x must have shape (batch, N, N), got shape={tuple(x.shape)}"
+            )
+
+        if x.shape[-2:] != (self.n_nodes, self.n_nodes):
+            raise ValueError(
+                f"Expected spatial shape ({self.n_nodes}, {self.n_nodes}), "
+                f"got {tuple(x.shape[-2:])}"
+            )
+
+        x = x.float().unsqueeze(1)  # (B, 1, N, N)
         return self.encoder(x)
 
 
 class AssignmentEncoder(nn.Module):
     """
-    Encodes a full assignment sequence A_seq of shape (B, T, N, N, M)
-    into step embeddings of shape (B, T, embedding_size).
+    Encodes a sequence of already-aggregated assignment/path matrices
+    of shape (B, T, N, N) into step embeddings of shape (B, T, embedding_size).
 
-    Supported methods:
-        - "sum": simple masked sum over agent embeddings
-        - "attention_pool": single-vector attention pooling over agents
-        - "k_latent": K learned latent queries attending to the set of agents
+    There is no agent dimension M here anymore.
     """
 
-    supported_methods = {"sum", "attention_pool", "k_latent"}
-
-    def __init__(self,
+    def __init__(
+        self,
         n_nodes: int,
         embedding_size: int,
-        method: str = "sum",
         path_embedding_dim: int = 64,
-        agent_hidden_size: int | None = None,
+        path_hidden_size: int | None = None,
         dropout: float = 0.0,
-        num_latents: int = 4,
-        num_heads: int = 4,
     ):
         super().__init__()
 
-        if method not in self.supported_methods:
-            raise ValueError(
-                f"Unsupported method='{method}'. "
-                f"Choose one of {sorted(self.supported_methods)}."
-            )
-
-        if method == "k_latent" and path_embedding_dim % num_heads != 0:
-            raise ValueError(
-                "For method='k_latent', path_embedding_dim must be divisible by num_heads."
-            )
-
         self.n_nodes = n_nodes
         self.embedding_size = embedding_size
-        self.method = method
         self.path_embedding_dim = path_embedding_dim
-        self.num_latents = num_latents
 
-        # Shared encoder for one agent path (NxN -> D_agent)
-        self.agent_encoder = PathEncoder(
-            n_nodes = n_nodes,
+        self.path_encoder = PathEncoder(
+            n_nodes=n_nodes,
             path_embedding_dim=path_embedding_dim,
-            hidden_size=agent_hidden_size,
+            hidden_size=path_hidden_size,
             dropout=dropout,
         )
 
-        # Optional attention pooling to one vector
-        if self.method == "attention_pool":
-            self.attn_score = nn.Linear(path_embedding_dim, 1)
-
-        # K-latent set encoder:
-        # K learnable queries attend to the set of agent embeddings
-        if self.method == "k_latent":
-            self.latent_queries = nn.Parameter(
-                torch.randn(num_latents, path_embedding_dim)
-            )
-            self.latent_attention = nn.MultiheadAttention(
-                embed_dim=path_embedding_dim,
-                num_heads=num_heads,
-                dropout=dropout,
-                batch_first=True,
-            )
-
-        raw_output_size = self._get_raw_output_size()
-
-        # Final projection to the step embedding size expected by GRU
-        if raw_output_size == embedding_size:
+        if path_embedding_dim == embedding_size:
             self.output_projection = nn.Identity()
         else:
             self.output_projection = nn.Sequential(
-                nn.Linear(raw_output_size, embedding_size),
+                nn.Linear(path_embedding_dim, embedding_size),
                 nn.ReLU(),
             )
-
-    def _get_raw_output_size(self) -> int:
-        if self.method == "sum":
-            base_size = self.path_embedding_dim
-        elif self.method == "attention_pool":
-            base_size = self.path_embedding_dim
-        elif self.method == "k_latent":
-            base_size = self.num_latents * self.path_embedding_dim
-        else:
-            raise RuntimeError("Unknown method encountered internally.")
-
-        return base_size
-
-    def _prepare_agents(self, A_seq: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, int, int]:
-        """
-        Converts (B, T, N, N, M) into:
-            agent_tokens: (B*T, M, D_agent)
-            agent_mask:   (B*T, M) bool, True for active agents
-        """
-        if A_seq.ndim != 5:
-            raise ValueError(
-                f"A_seq must have shape (B, T, N, N, M), got shape={tuple(A_seq.shape)}"
-            )
-
-        B, T, N1, N2, M = A_seq.shape
-
-        if N1 != self.n_nodes or N2 != self.n_nodes:
-            raise ValueError(
-                f"Expected spatial shape ({self.n_nodes}, {self.n_nodes}), got ({N1}, {N2})."
-            )
-
-        # Move agent dimension before spatial dimensions:
-        # (B, T, N, N, M) -> (B, T, M, N, N)
-        A_seq = A_seq.permute(0, 1, 4, 2, 3).contiguous()
-
-        # Detect active agents:
-        # active if its NxN matrix is not entirely zero
-        # shape: (B, T, M)
-        agent_mask = (A_seq.abs().sum(dim=(-1, -2)) > 0)
-
-        # Flatten each agent path matrix:
-        # (B, T, M, N, N) -> (B*T, M, N*N)
-        A_flat = A_seq.reshape(B * T, M, self.n_nodes * self.n_nodes).float()
-
-        # Encode each agent independently:
-        # (B*T, M, N*N) -> (B*T, M, D_agent)
-        agent_tokens = self.agent_encoder(A_flat)
-
-        # Flatten mask along (B, T)
-        agent_mask = agent_mask.reshape(B * T, M)
-
-        return agent_tokens, agent_mask, B, T
-
-    def _sum_pool(self, agent_tokens: torch.Tensor, agent_mask: torch.Tensor) -> torch.Tensor:
-        """
-        Masked sum over agent dimension.
-        """
-        masked_tokens = agent_tokens * agent_mask.unsqueeze(-1).float()
-        pooled = masked_tokens.sum(dim=1)  # (B*T, D_agent)
-        return pooled
-
-    def _attention_pool(self, agent_tokens: torch.Tensor, agent_mask: torch.Tensor) -> torch.Tensor:
-        """
-        Learned attention pooling from a set of agent embeddings to a single vector.
-        """
-        # (B*T, M)
-        scores = self.attn_score(agent_tokens).squeeze(-1)
-
-        # Mask inactive agents before softmax
-        scores = scores.masked_fill(~agent_mask, -1e9)
-
-        # Standard masked softmax with extra protection for all-empty rows
-        weights = torch.softmax(scores, dim=-1)
-        weights = weights * agent_mask.float()
-        weights = weights / weights.sum(dim=-1, keepdim=True).clamp(min=1.0)
-
-        # Weighted sum: (B*T, 1, M) x (B*T, M, D) -> (B*T, D)
-        pooled = torch.bmm(weights.unsqueeze(1), agent_tokens).squeeze(1)
-        return pooled
-
-    def _k_latent_pool(
-        self, agent_tokens: torch.Tensor, agent_mask: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        K learned latent queries attend to the set of agent embeddings.
-
-        Output:
-            (B*T, K * D_agent)
-        """
-        BT, M, D = agent_tokens.shape
-
-        # Expand K latent queries for each sample in the batch
-        queries = self.latent_queries.unsqueeze(0).expand(BT, -1, -1)  # (BT, K, D)
-
-        # MultiheadAttention uses key_padding_mask=True for positions to ignore
-        key_padding_mask = ~agent_mask  # (BT, M)
-
-        # If a row has no active agents, attention would become numerically unstable.
-        # We fix it by unmasking one dummy zero token.
-        empty_rows = ~agent_mask.any(dim=1)
-        if empty_rows.any():
-            agent_tokens = agent_tokens.clone()
-            key_padding_mask = key_padding_mask.clone()
-
-            agent_tokens[empty_rows, 0, :] = 0.0
-            key_padding_mask[empty_rows, 0] = False
-
-        # Cross-attention from latent queries to agent tokens
-        slots, _ = self.latent_attention(
-            query=queries,
-            key=agent_tokens,
-            value=agent_tokens,
-            key_padding_mask=key_padding_mask,
-        )  # (BT, K, D)
-
-        # Flatten K latent slots into one step vector
-        pooled = slots.reshape(BT, self.num_latents * D)
-        return pooled
 
     def forward(self, A_seq: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            A_seq: Tensor of shape (B, T, N, N, M)
+            A_seq: Tensor of shape (B, T, N, N)
 
         Returns:
             step_embeddings: Tensor of shape (B, T, embedding_size)
         """
-        agent_tokens, agent_mask, B, T = self._prepare_agents(A_seq)
+        if A_seq.ndim != 4:
+            raise ValueError(
+                f"A_seq must have shape (B, T, N, N), got shape={tuple(A_seq.shape)}"
+            )
 
-        if self.method == "sum":
-            raw_step_repr = self._sum_pool(agent_tokens, agent_mask)
-        elif self.method == "attention_pool":
-            raw_step_repr = self._attention_pool(agent_tokens, agent_mask)
-        elif self.method == "k_latent":
-            raw_step_repr = self._k_latent_pool(agent_tokens, agent_mask)
-        else:
-            raise RuntimeError("Unknown method encountered internally.")
+        B, T, N1, N2 = A_seq.shape
 
-        # Project to the final embedding size for the temporal model
-        step_embeddings = self.output_projection(raw_step_repr)  # (B*T, embedding_size)
+        if N1 != self.n_nodes or N2 != self.n_nodes:
+            raise ValueError(
+                f"Expected spatial shape ({self.n_nodes}, {self.n_nodes}), "
+                f"got ({N1}, {N2})."
+            )
 
-        # Restore time dimension
+        # (B, T, N, N) -> (B*T, N, N)
+        x = A_seq.reshape(B * T, self.n_nodes, self.n_nodes)
+
+        # (B*T, N, N) -> (B*T, path_embedding_dim)
+        step_repr = self.path_encoder(x)
+
+        # (B*T, path_embedding_dim) -> (B*T, embedding_size)
+        step_embeddings = self.output_projection(step_repr)
+
+        # (B*T, embedding_size) -> (B, T, embedding_size)
         step_embeddings = step_embeddings.reshape(B, T, self.embedding_size)
         return step_embeddings
+
+
 
 
 
