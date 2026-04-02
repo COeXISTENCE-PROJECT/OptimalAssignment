@@ -50,7 +50,6 @@ def agreguj_dane_krawedzi(plik_wejsciowy, plik_wyjsciowy):
             for base_id in sorted(agregacja.keys()):
                 data = agregacja[base_id]
 
-                # Obliczamy średnią współrzędnych
                 avg_x = data["coords"][0] / data["count"]
                 avg_y = data["coords"][1] / data["count"]
 
