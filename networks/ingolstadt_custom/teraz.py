@@ -3,9 +3,9 @@ import xml.etree.ElementTree as ET
 import re
 
 NET_FILE = "ing_sim.net.xml"
-JUNCTION_MATRIX = "aggregated_junction_matrix.csv"
-FLOW_DATA = "aggregated_ingolstadt_1033.csv"  # Ta, która ma już zsumowane kroki
-OUTPUT_FILE = "corridor_flow_matrix_FIXED.csv"
+JUNCTION_MATRIX = "data/aggregated_junction_matrix.csv"
+FLOW_DATA = "data/aggregated_ingolstadt_1033.csv"  # Ta, która ma już zsumowane kroki
+OUTPUT_FILE = "data/corridor_flow_matrix_FIXED.csv"
 
 
 def get_root(eid):
