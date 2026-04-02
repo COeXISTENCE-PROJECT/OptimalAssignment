@@ -66,4 +66,4 @@ def agreguj_dane_krawedzi(plik_wejsciowy, plik_wyjsciowy):
 
 # Uruchomienie skryptu
 # Upewnij się, że nazwa pliku wejściowego zgadza się z Twoją rzeczywistą nazwą
-agreguj_dane_krawedzi("aggregated_traffic_data.csv", "zagregowane_dane.csv")
+agreguj_dane_krawedzi("ai0.csv", "zagregowane_dane2.csv")

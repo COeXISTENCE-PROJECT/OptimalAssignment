@@ -42,4 +42,4 @@ def generuj_heatmape(plik_csv, nazwa_obrazu="heatmapa_krawedzi.png"):
         print(f"Błąd podczas tworzenia heatmapy: {e}")
 
 
-generuj_heatmape("zagregowane_dane.csv")
+generuj_heatmape("ai0.csv")
