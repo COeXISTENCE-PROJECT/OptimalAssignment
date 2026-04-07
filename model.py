@@ -287,12 +287,8 @@ class GRU_Representation(nn.Module):
         self.assignment_encoder = AssignmentEncoder(
             n_nodes=n_nodes,
             embedding_size=embedding_size,
-            method=assignment_method,
             path_embedding_dim=path_embedding_dim,
-            agent_hidden_size=agent_hidden_size,
             dropout=dropout,
-            num_latents=num_latents,
-            num_heads=num_heads,
         )
 
         self.gru = nn.GRU(
@@ -392,12 +388,8 @@ class LSTM_Representation(nn.Module):
         self.assignment_encoder = AssignmentEncoder(
             n_nodes=n_nodes,
             embedding_size=embedding_size,
-            method=assignment_method,
             path_embedding_dim=path_embedding_dim,
-            agent_hidden_size=agent_hidden_size,
             dropout=dropout,
-            num_latents=num_latents,
-            num_heads=num_heads,
         )
 
         self.lstm = nn.LSTM(
@@ -513,12 +505,8 @@ class AttentionRepresentation(nn.Module):
         self.assignment_encoder = AssignmentEncoder(
             n_nodes=n_nodes,
             embedding_size=embedding_size,
-            method=assignment_method,
             path_embedding_dim=path_embedding_dim,
-            agent_hidden_size=agent_hidden_size,
             dropout=dropout,
-            num_latents=num_latents,
-            num_heads=assignment_num_heads,
         )
 
         self.pos_encoder = PositionalEncoding(
@@ -811,4 +799,65 @@ class gwnet(nn.Module):
         x = self.end_conv_2(x)
         return x
 
+
+class GraphWaveNetBackbone(gwnet):
+    """
+    Subclass gwnet, który zwraca reprezentację przed końcowym headem.
+    Latent = F.relu(skip) o shape (B, skip_channels, N, T')
+    """
+
+    def forward_features(self, input: torch.Tensor, pool: bool = False) -> torch.Tensor:
+        in_len = input.size(3)
+
+        if in_len < self.receptive_field:
+            x = F.pad(input, (self.receptive_field - in_len, 0, 0, 0))
+        else:
+            x = input
+
+        x = self.start_conv(x)
+        skip = None
+
+        new_supports = None
+        if self.gcn_bool and self.addaptadj and self.supports is not None:
+            adp = F.softmax(F.relu(torch.mm(self.nodevec1, self.nodevec2)), dim=1)
+            new_supports = self.supports + [adp]
+
+        for i in range(self.blocks * self.layers):
+            residual = x
+
+            filter_out = torch.tanh(self.filter_convs[i](residual))
+            gate_out = torch.sigmoid(self.gate_convs[i](residual))
+            x = filter_out * gate_out
+
+            s = self.skip_convs[i](x)
+            if skip is None:
+                skip = s
+            else:
+                skip = skip[:, :, :, -s.size(3):] + s
+
+            if self.gcn_bool and self.supports is not None:
+                supports = new_supports if self.addaptadj else self.supports
+                x = self.gconv[i](x, supports)
+            else:
+                x = self.residual_convs[i](x)
+
+            x = x + residual[:, :, :, -x.size(3):]
+            x = self.bn[i](x)
+
+        features = F.relu(skip)  # (B, skip_channels, N, T')
+
+        if pool:
+            return features.mean(dim=(2, 3))  # (B, skip_channels)
+
+        return features
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        """
+        Zachowujemy standardowe forward do pełnej predykcji gwnet,
+        ale opieramy go o forward_features().
+        """
+        features = self.forward_features(input, pool=False)
+        x = F.relu(self.end_conv_1(features))
+        x = self.end_conv_2(x)
+        return x
 
