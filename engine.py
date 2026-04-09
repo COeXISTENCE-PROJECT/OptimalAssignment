@@ -6,6 +6,24 @@ import util
 from ADTTP_Model import ADTTP
 
 
+def _unpack_batch(self, batch_or_q, a=None, real_val=None, lengths=None):
+    # nowy format z DataLoadera:
+    # {"x": {"q": ..., "a": ...}, "y": ...}
+    if isinstance(batch_or_q, dict) and "x" in batch_or_q and "y" in batch_or_q:
+        x = batch_or_q["x"]
+        q = x["q"]
+        a = x["a"]
+        real_val = batch_or_q["y"]
+
+        if lengths is None:
+            lengths = x.get("lengths", batch_or_q.get("lengths", None))
+
+        return q, a, real_val, lengths
+
+    # stary format: train(q, a, real_val, lengths)
+    return batch_or_q, a, real_val, lengths
+
+
 class TrainerADTTP:
     def __init__(
         self,
@@ -75,33 +93,37 @@ class TrainerADTTP:
         self.scaler = scaler
         self.clip = 5
 
-    def _preparetarget(self, pred, real_val):
+    def _prepare_target(self, pred, real_val):
         real = real_val.to(self.device)
 
-        #target ma taki ksztalt jak predykcja
         if real.shape != pred.shape:
             real = real.reshape_as(pred)
 
         return real
 
-    def train(self, q, a, real_val, lengths=None):
-
+    def train(self, batch_or_q, a=None, real_val=None, lengths=None):
         self.model.train()
         self.optimizer.zero_grad()
 
+        q, a, real_val, lengths = self._unpack_batch(
+            batch_or_q, a=a, real_val=real_val, lengths=lengths
+        )
+
         q = q.to(self.device)
         a = a.to(self.device)
+        real_val = real_val.to(self.device)
+
         if lengths is not None:
             lengths = lengths.to(self.device)
 
-        pred = self.model(q, a, lengths = lengths)
+        pred = self.model(q, a, lengths=lengths)
 
         if self.scaler is not None:
             pred = self.scaler.inverse_transform(pred)
 
         real = self._prepare_target(pred, real_val)
 
-        loss = self._prepare_target(pred, real_val)
+        loss = self.loss(pred, real, 0.0)
         loss.backward()
 
         if self.clip is not None:
@@ -111,20 +133,25 @@ class TrainerADTTP:
 
         mape = util.masked_mape(pred, real, 0.0).item()
         rmse = util.masked_rmse(pred, real, 0.0).item()
+
         return loss.item(), mape, rmse
 
-
     @torch.no_grad()
-    def eval(self, q, a, real_val, lengths=None):
+    def eval(self, batch_or_q, a=None, real_val=None, lengths=None):
         self.model.eval()
+
+        q, a, real_val, lengths = self._unpack_batch(
+            batch_or_q, a=a, real_val=real_val, lengths=lengths
+        )
 
         q = q.to(self.device)
         a = a.to(self.device)
+        real_val = real_val.to(self.device)
 
         if lengths is not None:
             lengths = lengths.to(self.device)
 
-        pred = self.model(q, a, lengths = lengths)
+        pred = self.model(q, a, lengths=lengths)
 
         if self.scaler is not None:
             pred = self.scaler.inverse_transform(pred)

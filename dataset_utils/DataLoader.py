@@ -18,8 +18,8 @@ class SumoFolderDataset(Dataset):
     def __init__(
         self,
         root_dir: str | Path,
-        seq_length_q: int = 5,
-        seq_length_a: int = 5,
+        seq_length_q: int = 15,
+        seq_length_a: int = 30,
         seq_length_y: int = 1,
         dtype: torch.dtype = torch.float32,
     ) -> None:
