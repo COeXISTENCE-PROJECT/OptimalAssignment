@@ -4,7 +4,7 @@ import argparse
 import time
 import util
 import matplotlib.pyplot as plt
-from engine import Trainer
+from engine import TrainerADTTP
 import pandas as pd
 import os
 
@@ -61,10 +61,24 @@ def main():
     if args.aptonly:
         supports = None
 
-    engine = Trainer(scaler, args.in_dim, args.seq_length, args.num_nodes, args.nhid, args.dropout,
-                     args.learning_rate, args.weight_decay, device, supports, args.gcn_bool, args.addaptadj,
-                     adjinit, args.kernel_size, args.blocks, args.layers)
-
+    engine = TrainerADTTP(
+        scaler=scaler,
+        in_dim=args.in_dim,
+        num_nodes=args.num_nodes,
+        nhid=args.nhid,
+        dropout=args.dropout,
+        lrate=args.learning_rate,
+        wdecay=args.weight_decay,
+        device=device,
+        supports=supports,
+        gcn_bool=args.gcn_bool,
+        addaptadj=args.addaptadj,
+        aptinit=adjinit,
+        kernel_size=args.kernel_size,
+        blocks=args.blocks,
+        layers=args.layers,
+        target_dim=args.num_nodes, #przewidywanie wektora nodów
+    )
 
 
     print("start training...", flush=True)

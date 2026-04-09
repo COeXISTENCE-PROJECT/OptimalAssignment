@@ -59,12 +59,46 @@ class SumoFolderDataset(Dataset):
         q_slice = flow[:nodes_to_copy, t_start : t_start + self.seq_length_q].T
         q_padded[:, :nodes_to_copy, 0] = q_slice
 
-        a_padded = np.zeros((self.seq_length_a, TARGET_NODES, TARGET_NODES))
+        a_padded = np.zeros((self.seq_length_a, TARGET_NODES, 1), dtype = np.float32)
         a_end = t_start + self.seq_length_a
 
-        if assign.shape[0] >= a_end:
-            a_slice = assign[t_start:a_end, :nodes_to_copy, :nodes_to_copy]
-            a_padded[:, :nodes_to_copy, :nodes_to_copy] = a_slice
+        if assign.ndim == 2:
+            # assign zapisane jako (N, T)
+            if assign.shape[0] == current_nodes:
+                if assign.shape[1] >= a_end:
+                    a_slice = assign[:nodes_to_copy, t_start:a_end].T
+                    a_padded[:, :nodes_to_copy, 0] = a_slice
+
+            # assign zapisane jako (T, N)
+            elif assign.shape[1] == current_nodes:
+                if assign.shape[0] >= a_end:
+                    a_slice = assign[t_start:a_end, :nodes_to_copy]
+                    a_padded[:, :nodes_to_copy, 0] = a_slice
+
+            else:
+                raise ValueError(f"Nieobsługiwany shape assign: {assign.shape}")
+
+        elif assign.ndim == 3 and assign.shape[-1] == 1:
+            # assign zapisane jako (N, T, 1)
+            if assign.shape[0] == current_nodes:
+                if assign.shape[1] >= a_end:
+                    a_slice = assign[:nodes_to_copy, t_start:a_end, 0].T
+                    a_padded[:, :nodes_to_copy, 0] = a_slice
+
+            # assign zapisane jako (T, N, 1)
+            elif assign.shape[1] == current_nodes:
+                if assign.shape[0] >= a_end:
+                    a_slice = assign[t_start:a_end, :nodes_to_copy, 0]
+                    a_padded[:, :nodes_to_copy, 0] = a_slice
+
+            else:
+                raise ValueError(f"Nieobsługiwany shape assign: {assign.shape}")
+
+        else:
+            raise ValueError(
+                f"assign musi mieć shape (N, T), (T, N), (N, T, 1) albo (T, N, 1), "
+                f"a dostałem {assign.shape}"
+            )
 
         y_padded = np.zeros((self.seq_length_y, TARGET_NODES, 1))
         y_t = t_start + self.seq_length_q

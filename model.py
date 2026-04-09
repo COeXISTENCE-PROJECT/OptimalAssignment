@@ -19,7 +19,7 @@ class nconv(nn.Module):
     def __init__(self):
         super(nconv, self).__init__()
 
-    def forward(self, x, A):
+    def forward(self, x, adj):
         """
         x: Input features (batch_size, num_channels, num_nodes, time_steps)
         A: Adjacency matrix (num_nodes, num_nodes)
@@ -27,7 +27,7 @@ class nconv(nn.Module):
         The einsum operation 'ncvl,vw->ncwl' effectively multiplies each
         node's features by the edge weights of its neighbors.
         """
-        x = torch.einsum('ncvl,vw->ncwl', (x, A))
+        x = torch.einsum('ncvl,vw->ncwl', (x, adj))
         return x.contiguous()
 
 
@@ -45,33 +45,51 @@ class linear(nn.Module):
 
 
 class fuse(nn.Module):
-    """
-    function that combines representation of Q from wavenet with Assignments representation
-    """
-    def __init__(self, dim_Q, dim_A, output_dim, method = 'concatenate'):
-        super(fuse, self).__init__()
-        self.method = method
+    def __init__(self, dim_Q, dim_A, output_dim, method='concatenate'):
+        super().__init__()
+
+        canonical_method = {
+            'concatenate': 'concatenate',
+            'hadamard': 'Hadamard',
+            'attention': 'Attention',
+        }.get(method.lower(), method)
+
+        self.method = canonical_method
 
         if self.method == 'concatenate':
-            self.mlp = nn.Sequential(nn.Linear(dim_Q + dim_A, output_dim), nn.ReLU())
+            self.mlp = nn.Sequential(
+                nn.Linear(dim_Q + dim_A, output_dim),
+                nn.ReLU(),
+            )
 
         elif self.method == 'Hadamard':
-            self.proj_Q = nn.Linear(dim_Q, output_dim)  #this is probably the same
-            self.proj_A = nn.Linear(dim_A, output_dim)  #this can be different in theory
+            self.proj_Q = nn.Linear(dim_Q, output_dim)
+            self.proj_A = nn.Linear(dim_A, output_dim)
 
         elif self.method == 'Attention':
-            self.K = nn.Linear(dim_A, output_dim) #keys
-            self.Q = nn.Linear(dim_Q, output_dim) #queries
+            self.q_proj = nn.Linear(dim_Q, output_dim)
+            self.a_proj = nn.Linear(dim_A, output_dim)
 
-            self.attention = nn.MultiheadAttention(embed_dim = output_dim, num_heads = 2, batch_first = True)
+            self.attention = nn.MultiheadAttention(
+                embed_dim=output_dim,
+                num_heads=2,
+                batch_first=True,
+            )
+
+            self.out_proj = nn.Linear(output_dim, output_dim)
 
 
-
+        else:
+            raise ValueError(f"Unknown fuse method: {method}")
 
     def forward(self, Q, A):
+        if Q.ndim != 2 or A.ndim != 2:
+            raise ValueError(
+                f"fuse expects Q and A with shape (B, D), got {Q.shape} and {A.shape}"
+            )
 
         if self.method == 'concatenate':
-            fused = torch.cat([Q,A], dim=-1)
+            fused = torch.cat([Q, A], dim=-1)
             output = self.mlp(fused)
 
         elif self.method == 'Hadamard':
@@ -80,13 +98,31 @@ class fuse(nn.Module):
             output = q * a
 
         elif self.method == 'Attention':
-            queries = self.Q(Q)
-            keys = self.K(A)
-            values = keys
+            q = self.q_proj(Q)                     # (B, D)
+            a = self.a_proj(A)                     # (B, D)
 
-            output, _ = self.attention(query = queries, key = keys, value = values)
+            query = q.unsqueeze(1)                 # (B, 1, D)
+            key_value = torch.stack([q, a], dim=1) # (B, 2, D)
 
+            output, _ = self.attention(
+                query=query,
+                key=key_value,
+                value=key_value,
+            )
 
+            output = output.squeeze(1)             # (B, D)
+            output = output + q                    #residual connection
+            output = self.out_proj(output)
+
+        else:
+            raise RuntimeError(
+                f"fuse.forward reached unsupported method={self.method!r}"
+            )
+
+        if output is None:
+            raise RuntimeError(
+                f"fuse.forward produced None for method={self.method!r}"
+            )
 
         return output
 
@@ -129,67 +165,102 @@ class PositionalEncoding(nn.Module):
 
 class PathEncoder(nn.Module):
     """
-    Encodes a single path represented as an NxN matrix
-    using a 2D convolutional network.
+    Encodes a single step represented as a graph signal of shape (B, N),
+    where N is the number of nodes and each node has 1 feature.
+
+    Default encoder: diffusion GCN.
     """
 
     def __init__(
         self,
         n_nodes: int,
         path_embedding_dim: int,
-        hidden_size: int | None = None,
+        hidden_size: int = 64,
         dropout: float = 0.0,
+        support_len: int = 3,
+        order: int = 2,
+        pooling: str = "mean",
     ):
         super().__init__()
 
         self.n_nodes = n_nodes
-        hidden = hidden_size or 64
+        self.pooling = pooling
+        self.support_len = support_len
 
-        self.encoder = nn.Sequential(
-            nn.Conv2d(1, hidden, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Dropout(dropout),
+        self.gcn1 = gcn(
+            c_in=1,
+            c_out=hidden_size,
+            dropout=dropout,
+            support_len=support_len,
+            order=order,
+        )
 
-            nn.Conv2d(hidden, hidden, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Dropout(dropout),
+        self.gcn2 = gcn(
+            c_in=hidden_size,
+            c_out=hidden_size,
+            dropout=dropout,
+            support_len=support_len,
+            order=order,
+        )
 
-            nn.AdaptiveAvgPool2d((1, 1)),  # (B, hidden, 1, 1)
-            nn.Flatten(),                  # (B, hidden)
-
-            nn.Linear(hidden, path_embedding_dim),
+        self.out_proj = nn.Sequential(
+            nn.Linear(hidden_size, path_embedding_dim),
             nn.ReLU(),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, support: list[torch.Tensor]) -> torch.Tensor:
         """
         Args:
-            x: Tensor of shape (batch, N, N)
+            x:
+                Tensor of shape (B, N)
+            support:
+                list of adjacency/support matrices, each of shape (N, N)
 
         Returns:
-            Tensor of shape (batch, path_embedding_dim)
+            Tensor of shape (B, path_embedding_dim)
         """
-        if x.ndim != 3:
+        if x.ndim != 2:
             raise ValueError(
-                f"x must have shape (batch, N, N), got shape={tuple(x.shape)}"
+                f"x must have shape (B, N), got shape={tuple(x.shape)}"
             )
 
-        if x.shape[-2:] != (self.n_nodes, self.n_nodes):
+        if x.shape[1] != self.n_nodes:
             raise ValueError(
-                f"Expected spatial shape ({self.n_nodes}, {self.n_nodes}), "
-                f"got {tuple(x.shape[-2:])}"
+                f"Expected x.shape[1] == {self.n_nodes}, got {x.shape[1]}"
             )
 
-        x = x.float().unsqueeze(1)  # (B, 1, N, N)
-        return self.encoder(x)
+        if len(support) != self.support_len:
+            raise ValueError(
+                f"Expected {self.support_len} support matrices, got {len(support)}"
+            )
+
+        # (B, N) -> (B, 1, N, 1)
+        x = x.float().unsqueeze(1).unsqueeze(-1)
+
+        h = self.gcn1(x, support)   # (B, hidden, N, 1)
+        h = F.relu(h)
+
+        h = self.gcn2(h, support)   # (B, hidden, N, 1)
+        h = F.relu(h)
+
+        # (B, hidden, N, 1) -> (B, hidden, N)
+        h = h.squeeze(-1)
+
+        if self.pooling == "mean":
+            h = h.mean(dim=-1)              # (B, hidden)
+        elif self.pooling == "max":
+            h = h.max(dim=-1).values        # (B, hidden)
+        else:
+            raise ValueError(f"Unknown pooling: {self.pooling}")
+
+        return self.out_proj(h)             # (B, path_embedding_dim)
+
 
 
 class AssignmentEncoder(nn.Module):
     """
-    Encodes a sequence of already-aggregated assignment/path matrices
-    of shape (B, T, N, N) into step embeddings of shape (B, T, embedding_size).
-
-    There is no agent dimension M here anymore.
+    Encodes a sequence of graph signals of shape (B, T, N)
+    into step embeddings of shape (B, T, embedding_size).
     """
 
     def __init__(
@@ -197,8 +268,11 @@ class AssignmentEncoder(nn.Module):
         n_nodes: int,
         embedding_size: int,
         path_embedding_dim: int = 64,
-        path_hidden_size: int | None = None,
+        path_hidden_size: int = 64,
         dropout: float = 0.0,
+        support_len: int = 3,
+        order: int = 2,
+        pooling: str = "mean",
     ):
         super().__init__()
 
@@ -211,6 +285,9 @@ class AssignmentEncoder(nn.Module):
             path_embedding_dim=path_embedding_dim,
             hidden_size=path_hidden_size,
             dropout=dropout,
+            support_len=support_len,
+            order=order,
+            pooling=pooling,
         )
 
         if path_embedding_dim == embedding_size:
@@ -221,38 +298,42 @@ class AssignmentEncoder(nn.Module):
                 nn.ReLU(),
             )
 
-    def forward(self, A_seq: torch.Tensor) -> torch.Tensor:
+    def forward(self, A_seq: torch.Tensor, support: list[torch.Tensor]) -> torch.Tensor:
         """
         Args:
-            A_seq: Tensor of shape (B, T, N, N)
+            A_seq:
+                Tensor of shape (B, T, N)
+            support:
+                list of support matrices, each of shape (N, N)
 
         Returns:
-            step_embeddings: Tensor of shape (B, T, embedding_size)
+            step_embeddings:
+                Tensor of shape (B, T, embedding_size)
         """
-        if A_seq.ndim != 4:
+        if A_seq.ndim != 3:
             raise ValueError(
-                f"A_seq must have shape (B, T, N, N), got shape={tuple(A_seq.shape)}"
+                f"A_seq must have shape (B, T, N), got shape={tuple(A_seq.shape)}"
             )
 
-        B, T, N1, N2 = A_seq.shape
+        B, T, N = A_seq.shape
 
-        if N1 != self.n_nodes or N2 != self.n_nodes:
+        if N != self.n_nodes:
             raise ValueError(
-                f"Expected spatial shape ({self.n_nodes}, {self.n_nodes}), "
-                f"got ({N1}, {N2})."
+                f"Expected last dim = {self.n_nodes}, got {N}"
             )
 
-        # (B, T, N, N) -> (B*T, N, N)
-        x = A_seq.reshape(B * T, self.n_nodes, self.n_nodes)
+        # (B, T, N) -> (B*T, N)
+        x = A_seq.reshape(B * T, N)
 
-        # (B*T, N, N) -> (B*T, path_embedding_dim)
-        step_repr = self.path_encoder(x)
+        # (B*T, N) -> (B*T, path_embedding_dim)
+        step_repr = self.path_encoder(x, support)
 
         # (B*T, path_embedding_dim) -> (B*T, embedding_size)
         step_embeddings = self.output_projection(step_repr)
 
         # (B*T, embedding_size) -> (B, T, embedding_size)
         step_embeddings = step_embeddings.reshape(B, T, self.embedding_size)
+
         return step_embeddings
 
 
@@ -261,12 +342,8 @@ class AssignmentEncoder(nn.Module):
 
 class GRU_Representation(nn.Module):
     """
-    Assignment sequence encoder:
-        (B, T, N, N, M) -> AssignmentEncoder -> GRU -> (B, T, hidden_size)
-
-    Notes:
-        - AssignmentEncoder is permutation-invariant with respect to agent order in M
-          for method="sum", "attention_pool", and "k_latent".
+    Sequence encoder:
+        (B, T, N) -> AssignmentEncoder(GCN) -> GRU -> (B, T, hidden_size)
     """
 
     def __init__(
@@ -276,11 +353,11 @@ class GRU_Representation(nn.Module):
         hidden_size: int,
         dropout: float = 0.0,
         num_layers: int = 1,
-        assignment_method: str = "sum",
         path_embedding_dim: int = 64,
-        agent_hidden_size: int | None = None,
-        num_latents: int = 4,
-        num_heads: int = 4,
+        path_hidden_size: int = 64,
+        support_len: int = 3,
+        order: int = 2,
+        pooling: str = "mean",
     ):
         super().__init__()
 
@@ -288,7 +365,11 @@ class GRU_Representation(nn.Module):
             n_nodes=n_nodes,
             embedding_size=embedding_size,
             path_embedding_dim=path_embedding_dim,
+            path_hidden_size=path_hidden_size,
             dropout=dropout,
+            support_len=support_len,
+            order=order,
+            pooling=pooling,
         )
 
         self.gru = nn.GRU(
@@ -301,34 +382,14 @@ class GRU_Representation(nn.Module):
 
     def forward(
         self,
-        A_seq: torch.Tensor,
+        a_seq: torch.Tensor,
+        support: list[torch.Tensor],
         lengths: torch.Tensor | None = None,
+        return_sequence: bool = False,
         return_hidden: bool = False,
         return_step_embeddings: bool = False,
     ):
-        """
-        Args:
-            A_seq:
-                Tensor of shape (B, T, N, N, M)
-            return_hidden:
-                If True, also return the final GRU hidden state.
-            return_step_embeddings:
-                If True, also return step embeddings produced by AssignmentEncoder.
-
-        Returns:
-            output:
-                Tensor of shape (B, T, hidden_size)
-
-            Optionally also:
-                hidden:
-                    Tensor of shape (num_layers, B, hidden_size)
-                step_embeddings:
-                    Tensor of shape (B, T, embedding_size)
-        """
-        # Step-wise assignment embeddings
-        step_embeddings = self.assignment_encoder(A_seq)  # (B, T, embedding_size)
-
-        #GRU with batch_first expect square tensor (with all sequences the same length for some reason)
+        step_embeddings = self.assignment_encoder(a_seq, support)  # (B, T, embedding_size)
 
         if lengths is not None:
             lengths_cpu = lengths.detach().cpu()
@@ -345,29 +406,32 @@ class GRU_Representation(nn.Module):
             output, _ = pad_packed_sequence(
                 packed_output,
                 batch_first=True,
-                total_length=A_seq.size(1),
+                total_length=a_seq.size(1),
             )
+
+            last_repr = hidden[-1]  # (B, hidden_size)
         else:
             output, hidden = self.gru(step_embeddings)
+            last_repr = hidden[-1]  # (B, hidden_size)
 
-        if return_hidden and return_step_embeddings:
-            return output, hidden, step_embeddings
+        results = [last_repr]
+
+        if return_sequence:
+            results.append(output)
         if return_hidden:
-            return output, hidden
+            results.append(hidden)
         if return_step_embeddings:
-            return output, step_embeddings
+            results.append(step_embeddings)
 
-        return output
+        if len(results) == 1:
+            return results[0]
+        return tuple(results)
 
 
 class LSTM_Representation(nn.Module):
     """
-    Assignment sequence encoder:
-        (B, T, N, N, M) -> AssignmentEncoder -> LSTM -> (B, T, hidden_size)
-
-    Notes:
-        - AssignmentEncoder is permutation-invariant with respect to agent order in M
-          for method="sum", "attention_pool", and "k_latent".
+    Sequence encoder:
+        (B, T, N) -> AssignmentEncoder(GCN) -> LSTM -> (B, T, hidden_size)
     """
 
     def __init__(
@@ -377,11 +441,11 @@ class LSTM_Representation(nn.Module):
         hidden_size: int,
         dropout: float = 0.0,
         num_layers: int = 1,
-        assignment_method: str = "sum",
         path_embedding_dim: int = 64,
-        agent_hidden_size: int | None = None,
-        num_latents: int = 4,
-        num_heads: int = 4,
+        path_hidden_size: int = 64,
+        support_len: int = 3,
+        order: int = 2,
+        pooling: str = "mean",
     ):
         super().__init__()
 
@@ -389,7 +453,11 @@ class LSTM_Representation(nn.Module):
             n_nodes=n_nodes,
             embedding_size=embedding_size,
             path_embedding_dim=path_embedding_dim,
+            path_hidden_size=path_hidden_size,
             dropout=dropout,
+            support_len=support_len,
+            order=order,
+            pooling=pooling,
         )
 
         self.lstm = nn.LSTM(
@@ -402,38 +470,20 @@ class LSTM_Representation(nn.Module):
 
     def forward(
         self,
-        A_seq: torch.Tensor,
+        a_seq: torch.Tensor,
+        supports: list[torch.Tensor],
         lengths: torch.Tensor | None = None,
+        return_sequence: bool = False,
         return_hidden: bool = False,
         return_cell: bool = False,
         return_step_embeddings: bool = False,
     ):
         """
         Args:
-            A_seq:
-                Tensor of shape (B, T, N, N, M)
-            lengths:
-                Optional tensor of true sequence lengths, shape (B,)
-            return_hidden:
-                If True, also return final hidden state.
-            return_cell:
-                If True, also return final cell state.
-            return_step_embeddings:
-                If True, also return step embeddings from AssignmentEncoder.
-
-        Returns:
-            output:
-                Tensor of shape (B, T, hidden_size)
-
-            Optionally also:
-                hidden:
-                    Tensor of shape (num_layers, B, hidden_size)
-                cell:
-                    Tensor of shape (num_layers, B, hidden_size)
-                step_embeddings:
-                    Tensor of shape (B, T, embedding_size)
+            A_seq: (B, T, N)
+            support: lista macierzy support, każda (N, N)
         """
-        step_embeddings = self.assignment_encoder(A_seq)  # (B, T, embedding_size)
+        step_embeddings = self.assignment_encoder(a_seq, supports)  # (B, T, d_step)
 
         if lengths is not None:
             lengths_cpu = lengths.detach().cpu()
@@ -450,13 +500,18 @@ class LSTM_Representation(nn.Module):
             output, _ = pad_packed_sequence(
                 packed_output,
                 batch_first=True,
-                total_length=A_seq.size(1),
+                total_length=a_seq.size(1),
             )
+
+            last_repr = hidden[-1]  # (B, hidden_size)
         else:
             output, (hidden, cell) = self.lstm(step_embeddings)
+            last_repr = hidden[-1]  # (B, hidden_size)
 
-        results = [output]
+        results = [last_repr]
 
+        if return_sequence:
+            results.append(output)
         if return_hidden:
             results.append(hidden)
         if return_cell:
@@ -481,19 +536,19 @@ class AttentionRepresentation(nn.Module):
     """
 
     def __init__(
-        self,
-        n_nodes: int,
-        embedding_size: int,
-        num_heads: int,
-        dim_feedforward: int,
-        dropout: float = 0.0,
-        num_layers: int = 1,
-        assignment_method: str = "sum",
-        path_embedding_dim: int = 64,
-        agent_hidden_size: int | None = None,
-        num_latents: int = 4,
-        assignment_num_heads: int = 4,
-        max_len: int = 5000,
+            self,
+            n_nodes: int,
+            embedding_size: int,
+            num_heads: int,
+            dim_feedforward: int,
+            dropout: float = 0.0,
+            num_layers: int = 1,
+            path_embedding_dim: int = 64,
+            path_hidden_size: int = 64,
+            support_len: int = 3,
+            order: int = 2,
+            pooling: str = "mean",
+            max_len: int = 5000,
     ):
         super().__init__()
 
@@ -506,7 +561,11 @@ class AttentionRepresentation(nn.Module):
             n_nodes=n_nodes,
             embedding_size=embedding_size,
             path_embedding_dim=path_embedding_dim,
+            path_hidden_size=path_hidden_size,
             dropout=dropout,
+            support_len=support_len,
+            order=order,
+            pooling=pooling,
         )
 
         self.pos_encoder = PositionalEncoding(
@@ -539,10 +598,12 @@ class AttentionRepresentation(nn.Module):
         return mask
 
     def forward(
-        self,
-        A_seq: torch.Tensor,
-        lengths: torch.Tensor | None = None,
-        return_step_embeddings: bool = False,
+            self,
+            a_seq: torch.Tensor,
+            supports: list[torch.Tensor],
+            lengths: torch.Tensor | None = None,
+            return_sequence: bool = False,
+            return_step_embeddings: bool = False,
     ):
         """
         Args:
@@ -561,24 +622,37 @@ class AttentionRepresentation(nn.Module):
                 step_embeddings:
                     Tensor of shape (B, T, embedding_size)
         """
-        step_embeddings = self.assignment_encoder(A_seq)  # (B, T, embedding_size)
+        step_embeddings = self.assignment_encoder(a_seq, supports)  # (B, T, d)
         embeddings_pos = self.pos_encoder(step_embeddings)
 
         src_key_padding_mask = None
         if lengths is not None:
             src_key_padding_mask = self._build_padding_mask(
                 lengths=lengths,
-                max_len=A_seq.size(1),
+                max_len=a_seq.size(1),
             )
 
         output = self.transformer_encoder(
             embeddings_pos,
             src_key_padding_mask=src_key_padding_mask,
-        )  # (B, T, embedding_size)
+        )  # (B, T, d)
 
+        if lengths is not None:
+            idx = lengths.to(output.device) - 1
+            last_repr = output[torch.arange(output.size(0), device=output.device), idx]
+        else:
+            last_repr = output[:, -1, :]
+
+        results = [last_repr]
+
+        if return_sequence:
+            results.append(output)
         if return_step_embeddings:
-            return output, step_embeddings
-        return output
+            results.append(step_embeddings)
+
+        if len(results) == 1:
+            return results[0]
+        return tuple(results)
 
 class gcn(nn.Module):
     """
@@ -631,7 +705,7 @@ class gwnet(nn.Module):
     """
 
     def __init__(self, device, num_nodes, dropout=0.3, supports=None, gcn_bool=True, addaptadj=True, aptinit=None,
-                 in_dim=2, out_dim=12, residual_channels=32, dilation_channels=32, skip_channels=256, end_channels=512,
+                 in_dim=1, out_dim=12, residual_channels=32, dilation_channels=32, skip_channels=256, end_channels=512,
                  kernel_size=2, blocks=4, layers=2):
         super(gwnet, self).__init__()
         self.dropout = dropout
@@ -777,13 +851,8 @@ class gwnet(nn.Module):
 
             # Spatial processing (GCN)
             if self.gcn_bool and self.supports is not None:
-                if self.addaptadj:
-                    for j, a in enumerate(new_supports):
-                        x = self.gconv[i](x, new_supports)
-                else:
-                    for j, a in enumerate(self.supports):
-
-                        x = self.gconv[i](x, self.supports)
+                supports = new_supports if self.addaptadj else self.supports
+                x = self.gconv[i](x, supports)
             else:
                 x = self.residual_convs[i](x)
 
@@ -802,17 +871,119 @@ class gwnet(nn.Module):
 
 class GraphWaveNetBackbone(gwnet):
     """
-    Subclass gwnet, który zwraca reprezentację przed końcowym headem.
-    Latent = F.relu(skip) o shape (B, skip_channels, N, T')
+    Backbone encoder for q-sequences.
+
+    Public input convention:
+        q_seq: (B, T, N)
+
+    Public output convention:
+        q_repr: (B, repr_dim)
+
+    Internally converts:
+        (B, T, N) -> (B, 1, N, T)
+    and then runs Graph WaveNet blocks.
+
+    The returned representation corresponds to the LAST temporal position
+    after temporal processing, pooled over nodes.
     """
 
-    def forward_features(self, input: torch.Tensor, pool: bool = False) -> torch.Tensor:
-        in_len = input.size(3)
+    def __init__(
+        self,
+        device,
+        num_nodes,
+        dropout=0.3,
+        supports=None,
+        gcn_bool=True,
+        addaptadj=True,
+        aptinit=None,
+        in_dim=1,
+        residual_channels=32,
+        dilation_channels=32,
+        skip_channels=256,
+        end_channels=512,
+        kernel_size=2,
+        blocks=4,
+        layers=2,
+        repr_dim=None,
+        node_pooling="mean",
+    ):
+        super().__init__(
+            device=device,
+            num_nodes=num_nodes,
+            dropout=dropout,
+            supports=supports,
+            gcn_bool=gcn_bool,
+            addaptadj=addaptadj,
+            aptinit=aptinit,
+            in_dim=in_dim,
+            out_dim=1,  # unused in backbone mode, but required by parent
+            residual_channels=residual_channels,
+            dilation_channels=dilation_channels,
+            skip_channels=skip_channels,
+            end_channels=end_channels,
+            kernel_size=kernel_size,
+            blocks=blocks,
+            layers=layers,
+        )
+
+        if in_dim != 1:
+            raise ValueError(
+                f"GraphWaveNetBackbone expects one scalar feature per node per time step, "
+                f"so in_dim should be 1. Got in_dim={in_dim}."
+            )
+
+        if node_pooling not in {"mean", "max"}:
+            raise ValueError(
+                f"node_pooling must be 'mean' or 'max', got {node_pooling}"
+            )
+
+        self.num_nodes = num_nodes
+        self.node_pooling = node_pooling
+        self.repr_dim = skip_channels if repr_dim is None else repr_dim
+
+        if self.repr_dim == skip_channels:
+            self.readout = nn.Identity()
+        else:
+            self.readout = nn.Linear(skip_channels, self.repr_dim)
+
+    def _prepare_input(self, q_seq: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            q_seq: Tensor of shape (B, T, N)
+
+        Returns:
+            x: Tensor of shape (B, 1, N, T)
+        """
+        if q_seq.ndim != 3:
+            raise ValueError(
+                f"q_seq must have shape (B, T, N), got shape={tuple(q_seq.shape)}"
+            )
+
+        B, T, N = q_seq.shape
+
+        if N != self.num_nodes:
+            raise ValueError(
+                f"Expected q_seq.shape[-1] == {self.num_nodes}, got {N}"
+            )
+
+        # (B, T, N) -> (B, N, T) -> (B, 1, N, T)
+        x = q_seq.transpose(1, 2).unsqueeze(1).float()
+        return x
+
+    def forward_features(self, q_seq: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            q_seq: Tensor of shape (B, T, N)
+
+        Returns:
+            features: Tensor of shape (B, skip_channels, N, T_out)
+        """
+        x = self._prepare_input(q_seq)  # (B, 1, N, T)
+
+        in_len = x.size(3)
 
         if in_len < self.receptive_field:
-            x = F.pad(input, (self.receptive_field - in_len, 0, 0, 0))
-        else:
-            x = input
+            x = F.pad(x, (self.receptive_field - in_len, 0, 0, 0))
 
         x = self.start_conv(x)
         skip = None
@@ -844,20 +1015,66 @@ class GraphWaveNetBackbone(gwnet):
             x = x + residual[:, :, :, -x.size(3):]
             x = self.bn[i](x)
 
-        features = F.relu(skip)  # (B, skip_channels, N, T')
-
-        if pool:
-            return features.mean(dim=(2, 3))  # (B, skip_channels)
-
+        features = F.relu(skip)  # (B, skip_channels, N, T_out)
         return features
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        q_seq: torch.Tensor,
+        return_feature_map: bool = False,
+        return_temporal_sequence: bool = False,
+    ):
         """
-        Zachowujemy standardowe forward do pełnej predykcji gwnet,
-        ale opieramy go o forward_features().
-        """
-        features = self.forward_features(input, pool=False)
-        x = F.relu(self.end_conv_1(features))
-        x = self.end_conv_2(x)
-        return x
+        Args:
+            q_seq:
+                Tensor of shape (B, T, N)
 
+            return_feature_map:
+                If True, also return full feature map of shape
+                (B, skip_channels, N, T_out)
+
+            return_temporal_sequence:
+                If True, also return pooled temporal sequence of shape
+                (B, T_out, skip_channels)
+
+        Returns:
+            By default:
+                q_repr: Tensor of shape (B, repr_dim)
+
+            Optionally also:
+                features: Tensor of shape (B, skip_channels, N, T_out)
+                seq_repr: Tensor of shape (B, T_out, skip_channels)
+        """
+        features = self.forward_features(q_seq)  # (B, C, N, T_out)
+
+        # take the LAST time position
+        last_features = features[:, :, :, -1]  # (B, C, N)
+
+        # pool over nodes
+        if self.node_pooling == "mean":
+            q_repr = last_features.mean(dim=-1)  # (B, C)
+        elif self.node_pooling == "max":
+            q_repr = last_features.max(dim=-1).values  # (B, C)
+        else:
+            raise ValueError(f"Unknown node_pooling: {self.node_pooling}")
+
+        q_repr = self.readout(q_repr)  # (B, repr_dim)
+
+        results = [q_repr]
+
+        if return_feature_map:
+            results.append(features)
+
+        if return_temporal_sequence:
+            if self.node_pooling == "mean":
+                seq_repr = features.mean(dim=2).transpose(1, 2)  # (B, T_out, C)
+            elif self.node_pooling == "max":
+                seq_repr = features.max(dim=2).values.transpose(1, 2)  # (B, T_out, C)
+            else:
+                raise ValueError(f"Unknown node_pooling: {self.node_pooling}")
+
+            results.append(seq_repr)
+
+        if len(results) == 1:
+            return results[0]
+        return tuple(results)

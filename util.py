@@ -146,6 +146,60 @@ def load_adj(csv_filename, adjtype):
         assert error, "adj type not defined"
     return sensor_ids, sensor_id_to_ind, adj
 
+def prepare_batch(batch, device, transpose_q=True):
+    """
+    Oczekiwane warianty batcha:
+      - dict: {"q": ..., "a": ..., "y": ..., "lengths": ...}
+      - tuple/list: (q, a, y) albo (q, a, y, lengths)
+    """
+
+    if isinstance(batch, dict):
+        q = batch["q"]
+        a = batch["a"]
+        y = batch["y"]
+        lengths = batch.get("lengths", None)
+
+    elif isinstance(batch, (tuple, list)):
+        if len(batch) == 4:
+            q, a, y, lengths = batch
+        elif len(batch) == 3:
+            q, a, y = batch
+            lengths = None
+        else:
+            raise ValueError("Batch musi mieć postać (q, a, y) albo (q, a, y, lengths).")
+    else:
+        raise TypeError("Nieobsługiwany format batcha.")
+
+    q = torch.as_tensor(q, dtype=torch.float32, device=device)
+    a = torch.as_tensor(a, dtype=torch.float32, device=device)
+    y = torch.as_tensor(y, dtype=torch.float32, device=device)
+
+    if lengths is not None:
+        lengths = torch.as_tensor(lengths, dtype=torch.long, device=device)
+
+    # target do postaci (B, N)
+    if y.ndim == 4 and y.shape[1] == 1 and y.shape[-1] == 1:
+        # (B,1,N,1) -> (B,N)
+        y = y[:, 0, :, 0]
+    elif y.ndim == 3 and y.shape[-1] == 1:
+        # (B,N,1) -> (B,N)
+        y = y[..., 0]
+    elif y.ndim == 2:
+        # już jest (B,N)
+        pass
+    else:
+        raise ValueError(f"Nieoczekiwany shape targetu y: {tuple(y.shape)}")
+
+    # UWAGA:
+    # ADTTP ma niespójny opis shape q:
+    # - w docstringu modelu: (B,T,N,1)
+    # - GraphWaveNet zwykle używa (B,C,N,T)
+    # Jeśli Twój GraphWaveNetBackbone oczekuje starego układu, włącz transpose_q=True.
+    if transpose_q:
+        q = q.transpose(1, 3)
+
+    return q, a, y, lengths
+
 
 def load_dataset(dataset_dir, batch_size, valid_batch_size= None, test_batch_size=None):
     data = {}
