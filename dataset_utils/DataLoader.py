@@ -34,19 +34,29 @@ class SumoFolderDataset(Dataset):
 
         self.exp_files = sorted([f.name for f in self.flow_dir.glob("*.npy")])
         self.samples = []
+
         for f_name in self.exp_files:
             flow_data = np.load(self.flow_dir / f_name, mmap_mode="r")
-            n_timesteps = flow_data.shape[1]
-            max_start_t = n_timesteps - max(seq_length_q, seq_length_a) - seq_length_y
 
-            for t in range(max_start_t):
-                self.samples.append((f_name, t))
+            n_timesteps = flow_data.shape[1]
+
+            history_len = max(seq_length_q, seq_length_a)
+            first_t_end = history_len - 1
+            last_t_end = n_timesteps - seq_length_y - 1
+
+            for t_end in range(first_t_end, last_t_end + 1):
+                self.samples.append((f_name, t_end))
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> dict:
-        f_name, t_start = self.samples[idx]
+        f_name, t_end = self.samples[idx]
+
+        q_start = t_end - self.seq_length_q + 1
+        a_start = t_end - self.seq_length_a + 1
+        y_start = t_end + 1
+        y_end = y_start + self.seq_length_y
 
         TARGET_NODES = 195
         flow = np.load(self.flow_dir / f_name, mmap_mode="r")
@@ -55,25 +65,35 @@ class SumoFolderDataset(Dataset):
         current_nodes = flow.shape[0]
         nodes_to_copy = min(current_nodes, TARGET_NODES)
 
-        q_padded = np.zeros((self.seq_length_q, TARGET_NODES, 1))
-        q_slice = flow[:nodes_to_copy, t_start : t_start + self.seq_length_q].T
+        # q: [q_start, ..., t_end]
+        q_padded = np.zeros((self.seq_length_q, TARGET_NODES, 1), dtype=np.float32)
+        q_slice = flow[:nodes_to_copy, q_start:t_end + 1].T
         q_padded[:, :nodes_to_copy, 0] = q_slice
 
-        a_padded = np.zeros((self.seq_length_a, TARGET_NODES, 1), dtype = np.float32)
-        a_end = t_start + self.seq_length_a
+        # a: [a_start, ..., t_end]
+        a_padded = np.zeros((self.seq_length_a, TARGET_NODES, 1), dtype=np.float32)
+        a_end = t_end + 1  # równoważne: a_start + self.seq_length_a
 
         if assign.ndim == 2:
             # assign zapisane jako (N, T)
             if assign.shape[0] == current_nodes:
                 if assign.shape[1] >= a_end:
-                    a_slice = assign[:nodes_to_copy, t_start:a_end].T
+                    a_slice = assign[:nodes_to_copy, a_start:a_end].T
                     a_padded[:, :nodes_to_copy, 0] = a_slice
+                else:
+                    raise ValueError(
+                        f"assign ma za mało kroków czasu: shape={assign.shape}, a_end={a_end}"
+                    )
 
             # assign zapisane jako (T, N)
             elif assign.shape[1] == current_nodes:
                 if assign.shape[0] >= a_end:
-                    a_slice = assign[t_start:a_end, :nodes_to_copy]
+                    a_slice = assign[a_start:a_end, :nodes_to_copy]
                     a_padded[:, :nodes_to_copy, 0] = a_slice
+                else:
+                    raise ValueError(
+                        f"assign ma za mało kroków czasu: shape={assign.shape}, a_end={a_end}"
+                    )
 
             else:
                 raise ValueError(f"Nieobsługiwany shape assign: {assign.shape}")
@@ -82,14 +102,22 @@ class SumoFolderDataset(Dataset):
             # assign zapisane jako (N, T, 1)
             if assign.shape[0] == current_nodes:
                 if assign.shape[1] >= a_end:
-                    a_slice = assign[:nodes_to_copy, t_start:a_end, 0].T
+                    a_slice = assign[:nodes_to_copy, a_start:a_end, 0].T
                     a_padded[:, :nodes_to_copy, 0] = a_slice
+                else:
+                    raise ValueError(
+                        f"assign ma za mało kroków czasu: shape={assign.shape}, a_end={a_end}"
+                    )
 
             # assign zapisane jako (T, N, 1)
             elif assign.shape[1] == current_nodes:
                 if assign.shape[0] >= a_end:
-                    a_slice = assign[t_start:a_end, :nodes_to_copy, 0]
+                    a_slice = assign[a_start:a_end, :nodes_to_copy, 0]
                     a_padded[:, :nodes_to_copy, 0] = a_slice
+                else:
+                    raise ValueError(
+                        f"assign ma za mało kroków czasu: shape={assign.shape}, a_end={a_end}"
+                    )
 
             else:
                 raise ValueError(f"Nieobsługiwany shape assign: {assign.shape}")
@@ -100,11 +128,15 @@ class SumoFolderDataset(Dataset):
                 f"a dostałem {assign.shape}"
             )
 
-        y_padded = np.zeros((self.seq_length_y, TARGET_NODES, 1))
-        y_t = t_start + self.seq_length_q
-        if y_t < flow.shape[1]:
-            y_slice = flow[:nodes_to_copy, y_t : y_t + self.seq_length_y].T
+        # y: [t_end + 1, ..., t_end + seq_length_y]
+        y_padded = np.zeros((self.seq_length_y, TARGET_NODES, 1), dtype=np.float32)
+        if y_end <= flow.shape[1]:
+            y_slice = flow[:nodes_to_copy, y_start:y_end].T
             y_padded[:, :nodes_to_copy, 0] = y_slice
+        else:
+            raise ValueError(
+                f"flow ma za mało kroków czasu na target: shape={flow.shape}, y_end={y_end}"
+            )
 
         return {
             "x": {
