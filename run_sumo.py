@@ -1,9 +1,10 @@
 from dataset_utils.DataLoader import SumoFolderDataset
-from __init__ import *
+from dataset_utils.DataLoader import make_qA_loader
+#from __init__ import *
 import torch
 import util
 from model import gwnet
-from engine import Trainer
+from engine import TrainerADTTP
 import numpy as np
 import util
 import os
@@ -43,8 +44,8 @@ train_set, val_set = torch.utils.data.random_split(
     dataset, [train_size, len(dataset) - train_size]
 )
 
-train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
-val_loader = DataLoader(val_set, batch_size=batch_size)
+train_loader = make_qA_loader(train_set, batch_size=batch_size, shuffle=True)
+val_loader = make_qA_loader(val_set, batch_size=batch_size)
 
 
 def create_sumo_adj(assignment_dir, num_nodes):
@@ -86,7 +87,7 @@ model = gwnet(
     addaptadj=True,
 )
 
-engine = Trainer(
+engine = TrainerADTTP(
     scaler,
     in_dim,
     seq_length,

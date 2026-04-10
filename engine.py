@@ -6,22 +6,7 @@ import util
 from ADTTP_Model import ADTTP
 
 
-def _unpack_batch(self, batch_or_q, a=None, real_val=None, lengths=None):
-    # nowy format z DataLoadera:
-    # {"x": {"q": ..., "a": ...}, "y": ...}
-    if isinstance(batch_or_q, dict) and "x" in batch_or_q and "y" in batch_or_q:
-        x = batch_or_q["x"]
-        q = x["q"]
-        a = x["a"]
-        real_val = batch_or_q["y"]
 
-        if lengths is None:
-            lengths = x.get("lengths", batch_or_q.get("lengths", None))
-
-        return q, a, real_val, lengths
-
-    # stary format: train(q, a, real_val, lengths)
-    return batch_or_q, a, real_val, lengths
 
 
 class TrainerADTTP:
@@ -100,6 +85,23 @@ class TrainerADTTP:
             real = real.reshape_as(pred)
 
         return real
+
+    def _unpack_batch(self, batch_or_q, a=None, real_val=None, lengths=None):
+        # nowy format z DataLoadera:
+        # {"x": {"q": ..., "a": ...}, "y": ...}
+        if isinstance(batch_or_q, dict) and "x" in batch_or_q and "y" in batch_or_q:
+            x = batch_or_q["x"]
+            q = x["q"]
+            a = x["a"]
+            real_val = batch_or_q["y"]
+
+            if lengths is None:
+                lengths = x.get("lengths", batch_or_q.get("lengths", None))
+
+            return q, a, real_val, lengths
+
+        # stary format: train(q, a, real_val, lengths)
+        return batch_or_q, a, real_val, lengths
 
     def train(self, batch_or_q, a=None, real_val=None, lengths=None):
         self.model.train()

@@ -344,23 +344,43 @@ def main():
     #   {"x": {"q": ..., "a": ...}, "y": ...}
     # ----------------------------------------------------------
     train_loader = make_qA_loader(
-        root_dir=os.path.join(args.data, "train"),
+        flow_dir="/scratch/tmp/vec_flows_10s",
+        assign_dir="/scratch/tmp/vec_assignments_10s",
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
+        seq_length_q=15,
+        seq_length_a=30,
+        seq_length_y=1,
+        target_nodes=args.num_nodes,
     )
-    val_loader = make_qA_loader(
-        root_dir=os.path.join(args.data, "val"),
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-    )
-    test_loader = make_qA_loader(
-        root_dir=os.path.join(args.data, "test"),
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-    )
+
+    val_loader = train_loader
+    test_loader = train_loader
+
+
+    # val_loader = make_qA_loader(
+    #     flow_dir="valuation_dict_flow",
+    #     assign_dir="valuation_dict_assign",
+    #     batch_size=args.batch_size,
+    #     shuffle=True,
+    #     num_workers=args.num_workers,
+    #     seq_length_q=15,
+    #     seq_length_a=30,
+    #     seq_length_y=1,
+    #     target_nodes=args.num_nodes,
+    # )
+    # test_loader = make_qA_loader(
+    #     flow_dir="test_dict_flow",
+    #     assign_dir="test_dict_assign",
+    #     batch_size=args.batch_size,
+    #     shuffle=True,
+    #     num_workers=args.num_workers,
+    #     seq_length_q=15,
+    #     seq_length_a=30,
+    #     seq_length_y=1,
+    #     target_nodes=args.num_nodes,
+    # )
 
     scaler = None  # ustaw swój scaler tutaj tylko jeśli rzeczywiście go masz
 
