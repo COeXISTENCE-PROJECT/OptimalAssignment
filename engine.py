@@ -33,7 +33,7 @@ class TrainerADTTP:
         a_embedding_size = 32,
         a_hidden_size = 64,
         q_rep_dim = 32,
-        fused_dim = 61,
+        fused_dim = 64,
         mlp_hidden_dim = 128,
         attention_num_heads = 4,
         attention_ff_dim = 128
@@ -56,6 +56,7 @@ class TrainerADTTP:
 
         self.model = ADTTP(
             num_nodes=num_nodes,
+            supports = supports,  
             q_in_dim=in_dim,
             a_embedding_size=a_embedding_size,
             a_hidden_size=a_hidden_size,

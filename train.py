@@ -274,8 +274,8 @@ from dataset_utils.DataLoader import make_qA_loader
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--device', type=str, default='cuda:3', help='')
-parser.add_argument('--data', type=str, default='data/METR-LA', help='data root path')
-parser.add_argument('--adjdata', type=str, default='data/sensor_graph/adj_mx.pkl', help='adj data path')
+parser.add_argument('--data', type=str, default='/scratch/tmp', help='data root path')
+parser.add_argument('--adjdata', type=str, default=None, help='adj data path')
 parser.add_argument('--adjtype', type=str, default='doubletransition', help='adj type')
 parser.add_argument('--gcn_bool', action='store_true', help='whether to add graph convolution layer')
 parser.add_argument('--aptonly', action='store_true', help='whether only adaptive adj')
@@ -285,6 +285,7 @@ parser.add_argument('--randomadj', action='store_true', help='whether random ini
 # dla ADTTP q_in_dim musi być 1
 parser.add_argument('--in_dim', type=int, default=1, help='for ADTTP must be 1')
 parser.add_argument('--num_nodes', type=int, default=207, help='number of nodes')
+parser.add_argument('--nhid', type=int, default=32, help='hidden channels')
 parser.add_argument('--batch_size', type=int, default=64, help='batch size')
 parser.add_argument('--learning_rate', type=float, default=0.001, help='learning rate')
 parser.add_argument('--dropout', type=float, default=0.3, help='dropout rate')
@@ -319,12 +320,18 @@ def maybe_inverse_transform(scaler, x):
 
 
 def main():
+
     device = torch.device(args.device)
 
-    sensor_ids, sensor_id_to_ind, adj_mx = util.load_adj(args.adjdata, args.adjtype)
-    supports = [torch.tensor(i).to(device) for i in adj_mx]
+    if args.adjdata is not None and os.path.exists(args.adjdata):
+        _, _, adj_mx = util.load_adj(args.adjdata, args.adjtype)
+        supports = [torch.tensor(i, dtype=torch.float32, device=device) for i in adj_mx]
+    else:
+        I = torch.eye(args.num_nodes, dtype=torch.float32, device=device)
+        supports = [I.clone(), I.clone(), I.clone()]
+        print("UWAGA: brak pliku adjacency, używam 3x identity adjacency do smoke testu")
 
-    print(args)
+        print(args)
 
     if args.randomadj:
         adjinit = None
@@ -332,8 +339,7 @@ def main():
         adjinit = supports[0]
 
     if args.aptonly:
-        supports = None
-
+        supports = None 
     # ----------------------------------------------------------
     # NOWE LOADERY POD ADTTP
     # Zakładam strukturę:
