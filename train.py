@@ -268,6 +268,10 @@ from engine import TrainerADTTP
 import pandas as pd
 import os
 from dataset_utils.DataLoader import make_qA_loader
+from dataset_utils.DataLoader import SumoFolderDataset
+from torch.utils.data import DataLoader, Subset
+from pathlib import Path
+import random
 
 # przykładowo:
 # from your_dataset_module import make_qA_loader
@@ -275,6 +279,15 @@ from dataset_utils.DataLoader import make_qA_loader
 parser = argparse.ArgumentParser()
 parser.add_argument('--device', type=str, default='cuda:3', help='')
 parser.add_argument('--data', type=str, default='/scratch/tmp', help='data root path')
+parser.add_argument('--q_dir', type=str, default='/scratch/tmp/vec_flows_10s', help='flow directory')
+parser.add_argument('--a_dir', type=str, default='/scratch/tmp/vec_assignments_10s', help='assignment directory')
+parser.add_argument('--seed', type=int, default=42, help='random seed for split')
+parser.add_argument('--train_ratio', type=float, default=0.7, help='train split ratio')
+parser.add_argument('--val_ratio', type=float, default=0.15, help='validation split ratio')
+parser.add_argument('--seq_length_q', type=int, default=15, help='q history length')
+parser.add_argument('--seq_length_a', type=int, default=30, help='a history length')
+parser.add_argument('--seq_length_y', type=int, default=1, help='prediction horizon length')
+
 parser.add_argument('--adjdata', type=str, default=None, help='adj data path')
 parser.add_argument('--adjtype', type=str, default='doubletransition', help='adj type')
 parser.add_argument('--gcn_bool', action='store_true', help='whether to add graph convolution layer')
@@ -300,6 +313,78 @@ parser.add_argument('--layers', type=int, default=2, help='number of layers in o
 parser.add_argument('--num_workers', type=int, default=4, help='dataloader workers')
 
 args = parser.parse_args()
+
+def split_file_names(q_dir, a_dir, train_ratio=0.7, val_ratio=0.15, seed=42):
+    q_dir = Path(q_dir)
+    a_dir = Path(a_dir)
+
+    q_files = {p.name for p in q_dir.glob("*.npy")}
+    a_files = {p.name for p in a_dir.glob("*.npy")}
+    common_files = sorted(q_files & a_files)
+
+    if not common_files:
+        raise RuntimeError(
+            f"Brak wspólnych plików .npy między {q_dir} i {a_dir}"
+        )
+
+    rng = random.Random(seed)
+    rng.shuffle(common_files)
+
+    n = len(common_files)
+    n_train = max(1, int(n * train_ratio))
+    n_val = max(1, int(n * val_ratio))
+    n_test = n - n_train - n_val
+
+    if n_test <= 0:
+        n_test = 1
+        if n_train > n_val:
+            n_train -= 1
+        else:
+            n_val -= 1
+
+    train_files = common_files[:n_train]
+    val_files = common_files[n_train:n_train + n_val]
+    test_files = common_files[n_train + n_val:]
+
+    return train_files, val_files, test_files
+
+
+def make_subset_loader(
+    q_dir,
+    a_dir,
+    selected_files,
+    batch_size,
+    shuffle,
+    num_workers,
+    seq_length_q,
+    seq_length_a,
+    seq_length_y,
+    target_nodes,
+):
+    dataset = SumoFolderDataset(
+        flow_dir=q_dir,
+        assign_dir=a_dir,
+        seq_length_q=seq_length_q,
+        seq_length_a=seq_length_a,
+        seq_length_y=seq_length_y,
+        target_nodes=target_nodes,
+    )
+
+    selected_files = set(selected_files)
+    indices = [i for i, (f_name, _) in enumerate(dataset.samples) if f_name in selected_files]
+
+    if not indices:
+        raise RuntimeError("Subset datasetu jest pusty.")
+
+    subset = Subset(dataset, indices)
+
+    return DataLoader(
+        subset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        persistent_workers=(num_workers > 0),
+    )
 
 
 def infer_target_dim_from_batch(batch):
@@ -349,20 +434,61 @@ def main():
     # oraz batch:
     #   {"x": {"q": ..., "a": ...}, "y": ...}
     # ----------------------------------------------------------
-    train_loader = make_qA_loader(
-        flow_dir="/scratch/tmp/vec_flows_10s",
-        assign_dir="/scratch/tmp/vec_assignments_10s",
+    train_files, val_files, test_files = split_file_names(
+        q_dir=args.q_dir,
+        a_dir=args.a_dir,
+        train_ratio=args.train_ratio,
+        val_ratio=args.val_ratio,
+        seed=args.seed,
+    )
+
+    print(f"train files: {len(train_files)}")
+    print(f"val files: {len(val_files)}")
+    print(f"test files: {len(test_files)}")
+
+    train_loader = make_subset_loader(
+        q_dir=args.q_dir,
+        a_dir=args.a_dir,
+        selected_files=train_files,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        seq_length_q=15,
-        seq_length_a=30,
-        seq_length_y=1,
+        seq_length_q=args.seq_length_q,
+        seq_length_a=args.seq_length_a,
+        seq_length_y=args.seq_length_y,
         target_nodes=args.num_nodes,
     )
 
-    val_loader = train_loader
-    test_loader = train_loader
+    val_loader = make_subset_loader(
+        q_dir=args.q_dir,
+        a_dir=args.a_dir,
+        selected_files=val_files,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        seq_length_q=args.seq_length_q,
+        seq_length_a=args.seq_length_a,
+        seq_length_y=args.seq_length_y,
+        target_nodes=args.num_nodes,
+    )
+
+    test_loader = make_subset_loader(
+        q_dir=args.q_dir,
+        a_dir=args.a_dir,
+        selected_files=test_files,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        seq_length_q=args.seq_length_q,
+        seq_length_a=args.seq_length_a,
+        seq_length_y=args.seq_length_y,
+        target_nodes=args.num_nodes,
+    )
+
+    print("train dataset size:", len(train_loader.dataset))
+    print("val dataset size:", len(val_loader.dataset))
+    print("test dataset size:", len(test_loader.dataset))
+    print("batches per epoch:", len(train_loader))
 
 
     # val_loader = make_qA_loader(
