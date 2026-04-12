@@ -9,126 +9,112 @@
 set -euo pipefail
 
 cd /home/drozd/OptimalAssignment
+python_bin=/home/drozd/miniconda/envs/wavenet_env/bin/python
 
-PYTHON=/home/drozd/miniconda/envs/wavenet_env/bin/python
+# ===== dane =====
+q_dir=/scratch/tmp/vec_flows_10s
+a_dir=/scratch/tmp/vec_assignments_10s
+adjdata=hex_adjacency_matrix.csv
+data_root=/scratch/tmp
+save_dir=./garage/metr
 
-# =========================
-# ŚCIEŻKI / DANE
-# =========================
-Q_DIR=/scratch/tmp/vec_flows_10s
-A_DIR=/scratch/tmp/vec_assignments_10s
-ADJDATA=hex_adjacency_matrix.csv
-DATA_ROOT=/scratch/tmp
-SAVE_DIR=./garage/metr
+# ===== sprzęt / split =====
+device=cuda:0
+seed=42
+train_ratio=0.7
+val_ratio=0.15
 
-# =========================
-# URZĄDZENIE / SEED / SPLIT
-# =========================
-DEVICE=cuda:0
-SEED=42
-TRAIN_RATIO=0.7
-VAL_RATIO=0.15
+# ===== sekwencje =====
+seq_length_q=15
+seq_length_a=30
+seq_length_y=1
 
-# =========================
-# DŁUGOŚCI SEKWENCJI
-# =========================
-SEQ_LENGTH_Q=15
-SEQ_LENGTH_A=30
-SEQ_LENGTH_Y=1
+# ===== graf =====
+adjtype=doubletransition      # np. doubletransition / transition / identity
+gcn_bool=1                    # 1=on, 0=off
+aptonly=0                     # 1=on, 0=off
+addaptadj=1                   # 1=on, 0=off
+randomadj=0                   # 1=on, 0=off
 
-# =========================
-# GRAF
-# =========================
-ADJTYPE=doubletransition
-GCN_BOOL=1
-APTONLY=0
-ADDAPTADJ=1
-RANDOMADJ=0
+# ===== model =====
+in_dim=1
+num_nodes=195
+nhid=32
+dropout=0.3
+kernel_size=2
+blocks=4
+layers=2
 
-# =========================
-# PARAMETRY MODELU
-# =========================
-IN_DIM=1
-NUM_NODES=195
-NHID=32
-DROPOUT=0.3
-KERNEL_SIZE=2
-BLOCKS=4
-LAYERS=2
+target_dim=1
+sequence_model=lstm           # lstm / gru
+fuse_method=Attention         # Attention / Concat / MLP
+a_embedding_size=32
+a_hidden_size=64
+q_rep_dim=32
+fused_dim=64
+mlp_hidden_dim=128
+attention_num_heads=4
+attention_ff_dim=128
 
-TARGET_DIM=1
-SEQUENCE_MODEL=lstm
-FUSE_METHOD=Attention
-A_EMBEDDING_SIZE=32
-A_HIDDEN_SIZE=64
-Q_REP_DIM=32
-FUSED_DIM=64
-MLP_HIDDEN_DIM=128
-ATTENTION_NUM_HEADS=4
-ATTENTION_FF_DIM=128
-
-# =========================
-# TRENING
-# =========================
-BATCH_SIZE=16
-LEARNING_RATE=0.001
-WEIGHT_DECAY=0.0001
-EPOCHS=200
-PRINT_EVERY=1000
-NUM_WORKERS=4
-EXPID=1
+# ===== trening =====
+batch_size=16
+learning_rate=0.001
+weight_decay=0.0001
+epochs=200
+print_every=1000
+num_workers=4
+expid=1
 
 echo "Python version:"
-"$PYTHON" -V
+"$python_bin" -V
 echo "Python executable:"
-"$PYTHON" -c "import sys; print(sys.executable)"
+"$python_bin" -c "import sys; print(sys.executable)"
 echo "Torch version:"
-"$PYTHON" -c "import torch; print(torch.__version__)"
+"$python_bin" -c "import torch; print(torch.__version__)"
 
-# Flagi boolowskie składamy warunkowo
-ARGS=()
+args=()
 
-[[ "$GCN_BOOL" -eq 1 ]]   && ARGS+=(--gcn_bool)
-[[ "$APTONLY" -eq 1 ]]    && ARGS+=(--aptonly)
-[[ "$ADDAPTADJ" -eq 1 ]]  && ARGS+=(--addaptadj)
-[[ "$RANDOMADJ" -eq 1 ]]  && ARGS+=(--randomadj)
+[[ "$gcn_bool" -eq 1 ]]   && args+=(--gcn_bool)
+[[ "$aptonly" -eq 1 ]]    && args+=(--aptonly)
+[[ "$addaptadj" -eq 1 ]]  && args+=(--addaptadj)
+[[ "$randomadj" -eq 1 ]]  && args+=(--randomadj)
 
-"$PYTHON" train.py \
-  --device "$DEVICE" \
-  --data "$DATA_ROOT" \
-  --q_dir "$Q_DIR" \
-  --a_dir "$A_DIR" \
-  --seed "$SEED" \
-  --train_ratio "$TRAIN_RATIO" \
-  --val_ratio "$VAL_RATIO" \
-  --seq_length_q "$SEQ_LENGTH_Q" \
-  --seq_length_a "$SEQ_LENGTH_A" \
-  --seq_length_y "$SEQ_LENGTH_Y" \
-  --adjdata "$ADJDATA" \
-  --adjtype "$ADJTYPE" \
-  --in_dim "$IN_DIM" \
-  --num_nodes "$NUM_NODES" \
-  --nhid "$NHID" \
-  --batch_size "$BATCH_SIZE" \
-  --learning_rate "$LEARNING_RATE" \
-  --dropout "$DROPOUT" \
-  --weight_decay "$WEIGHT_DECAY" \
-  --epochs "$EPOCHS" \
-  --print_every "$PRINT_EVERY" \
-  --save "$SAVE_DIR" \
-  --expid "$EXPID" \
-  --kernel_size "$KERNEL_SIZE" \
-  --blocks "$BLOCKS" \
-  --layers "$LAYERS" \
-  --num_workers "$NUM_WORKERS" \
-  --target_dim "$TARGET_DIM" \
-  --sequence_model "$SEQUENCE_MODEL" \
-  --fuse_method "$FUSE_METHOD" \
-  --a_embedding_size "$A_EMBEDDING_SIZE" \
-  --a_hidden_size "$A_HIDDEN_SIZE" \
-  --q_rep_dim "$Q_REP_DIM" \
-  --fused_dim "$FUSED_DIM" \
-  --mlp_hidden_dim "$MLP_HIDDEN_DIM" \
-  --attention_num_heads "$ATTENTION_NUM_HEADS" \
-  --attention_ff_dim "$ATTENTION_FF_DIM" \
-  "${ARGS[@]}"
+"$python_bin" train.py \
+  --device "$device" \
+  --data "$data_root" \
+  --q_dir "$q_dir" \
+  --a_dir "$a_dir" \
+  --seed "$seed" \
+  --train_ratio "$train_ratio" \
+  --val_ratio "$val_ratio" \
+  --seq_length_q "$seq_length_q" \
+  --seq_length_a "$seq_length_a" \
+  --seq_length_y "$seq_length_y" \
+  --adjdata "$adjdata" \
+  --adjtype "$adjtype" \
+  --in_dim "$in_dim" \
+  --num_nodes "$num_nodes" \
+  --nhid "$nhid" \
+  --batch_size "$batch_size" \
+  --learning_rate "$learning_rate" \
+  --dropout "$dropout" \
+  --weight_decay "$weight_decay" \
+  --epochs "$epochs" \
+  --print_every "$print_every" \
+  --save "$save_dir" \
+  --expid "$expid" \
+  --kernel_size "$kernel_size" \
+  --blocks "$blocks" \
+  --layers "$layers" \
+  --num_workers "$num_workers" \
+  --target_dim "$target_dim" \
+  --sequence_model "$sequence_model" \
+  --fuse_method "$fuse_method" \
+  --a_embedding_size "$a_embedding_size" \
+  --a_hidden_size "$a_hidden_size" \
+  --q_rep_dim "$q_rep_dim" \
+  --fused_dim "$fused_dim" \
+  --mlp_hidden_dim "$mlp_hidden_dim" \
+  --attention_num_heads "$attention_num_heads" \
+  --attention_ff_dim "$attention_ff_dim" \
+  "${args[@]}"
