@@ -24,19 +24,19 @@ class TrainerADTTP:
         gcn_bool,
         addaptadj,
         aptinit,
-        kernel_size,
-        blocks,
-        layers,
+        kernel_size = 2,
+        blocks = 4,
+        layers = 3,
         target_dim = 1,
         sequence_model = "lstm",
-        fuse_method = "Attention",
+        fuse_method = "attention",
         a_embedding_size = 32,
-        a_hidden_size = 64,
+        a_hidden_size = 32,
         q_rep_dim = 32,
         fused_dim = 64,
-        mlp_hidden_dim = 128,
+        mlp_hidden_dim = 64,
         attention_num_heads = 4,
-        attention_ff_dim = 128
+        attention_ff_dim = 64
     ):
         self.device = device
 

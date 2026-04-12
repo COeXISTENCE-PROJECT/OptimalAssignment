@@ -29,12 +29,24 @@ parser.add_argument('--seq_length_q', type=int, default=15, help='q history leng
 parser.add_argument('--seq_length_a', type=int, default=30, help='a history length')
 parser.add_argument('--seq_length_y', type=int, default=1, help='prediction horizon length')
 
+
+
 parser.add_argument('--adjdata', type=str, default=None, help='adj data path')
 parser.add_argument('--adjtype', type=str, default='doubletransition', help='adj type')
 parser.add_argument('--gcn_bool', action='store_true', help='whether to add graph convolution layer')
 parser.add_argument('--aptonly', action='store_true', help='whether only adaptive adj')
 parser.add_argument('--addaptadj', action='store_true', help='whether add adaptive adj')
 parser.add_argument('--randomadj', action='store_true', help='whether random initialize adaptive adj')
+
+parser.add_argument('--sequence_model', type=str, default='lstm', choices=['lstm', 'gru', 'attention'])
+parser.add_argument('--fuse_method', type=str, default='Attention', choices=['concatenate', 'Attention'])
+parser.add_argument('--fused_dim', type=int, default=64)
+parser.add_argument('--a_embedding_size', type=int, default=32)
+parser.add_argument('--a_hidden_size', type=int, default=64)
+parser.add_argument('--q_rep_dim', type=int, default=32)
+parser.add_argument('--mlp_hidden_dim', type=int, default=128)
+parser.add_argument('--attention_num_heads', type=int, default=4)
+parser.add_argument('--attention_ff_dim', type=int, default=128)
 
 # dla ADTTP q_in_dim musi być 1
 parser.add_argument('--in_dim', type=int, default=1, help='for ADTTP must be 1')
@@ -291,7 +303,16 @@ def main():
         blocks=args.blocks,
         layers=args.layers,
         target_dim=target_dim,
-    )
+        sequence_model=args.sequence_model,
+        fuse_method=args.fuse_method,
+        a_embedding_size=args.a_embedding_size,
+        a_hidden_size=args.a_hidden_size,
+        q_rep_dim=args.q_rep_dim,
+        fused_dim=args.fused_dim,
+        mlp_hidden_dim=args.mlp_hidden_dim,
+        attention_num_heads=args.attention_num_heads,
+        attention_ff_dim=args.attention_ff_dim,
+            )
 
     print("start training...", flush=True)
 

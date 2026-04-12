@@ -40,17 +40,17 @@ class ADTTP(nn.Module):
         supports: list[torch.Tensor] | None = None,
         q_in_dim: int = 1,
         a_embedding_size: int = 32,
-        a_hidden_size: int = 64,
+        a_hidden_size: int = 32,
         q_rep_dim: int = 32,
         fused_dim: int = 64,
-        mlp_hidden_dim: int = 128,
+        mlp_hidden_dim: int = 64,
         target_dim: int = 1,
         sequence_model: str = "lstm",      # "lstm" / "gru" / "attention"
         fuse_method: str = "Attention",    # "concatenate" / "Hadamard" / "Attention"
         dropout: float = 0.1,
         device: str = "cuda",
         attention_num_heads: int = 4,
-        attention_ff_dim: int = 128,
+        attention_ff_dim: int = 64,
         gwnet_kwargs: dict | None = None,
     ):
         super().__init__()
