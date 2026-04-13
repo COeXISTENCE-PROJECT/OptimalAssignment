@@ -1,12 +1,8 @@
 import torch
-
 import torch.nn as nn
 import torch.optim as optim
 import util
 from ADTTP_Model import ADTTP
-
-
-
 
 
 class TrainerADTTP:
@@ -24,19 +20,20 @@ class TrainerADTTP:
         gcn_bool,
         addaptadj,
         aptinit,
-        kernel_size = 2,
-        blocks = 4,
-        layers = 3,
-        target_dim = 1,
-        sequence_model = "lstm",
-        fuse_method = "attention",
-        a_embedding_size = 32,
-        a_hidden_size = 32,
-        q_rep_dim = 32,
-        fused_dim = 64,
-        mlp_hidden_dim = 64,
-        attention_num_heads = 4,
-        attention_ff_dim = 64
+        kernel_size=2,
+        blocks=4,
+        layers=3,
+        target_dim=1,
+        sequence_model="lstm",
+        fuse_method="attention",
+        a_embedding_size=32,
+        a_hidden_size=32,
+        q_rep_dim=32,
+        fused_dim=64,
+        mlp_hidden_dim=64,
+        attention_num_heads=4,
+        attention_ff_dim=64,
+        loss_name="mae",
     ):
         self.device = device
 
@@ -56,7 +53,7 @@ class TrainerADTTP:
 
         self.model = ADTTP(
             num_nodes=num_nodes,
-            supports = supports,  
+            supports=supports,
             q_in_dim=in_dim,
             a_embedding_size=a_embedding_size,
             a_hidden_size=a_hidden_size,
@@ -75,9 +72,22 @@ class TrainerADTTP:
         self.optimizer = optim.Adam(
             self.model.parameters(), lr=lrate, weight_decay=wdecay
         )
-        self.loss = util.masked_mae
+
+        self.loss_name = loss_name.lower()
+        self.loss = self._get_loss_fn(self.loss_name)
+
         self.scaler = scaler
         self.clip = 5
+
+    def _get_loss_fn(self, loss_name):
+        if loss_name == "mae":
+            return util.masked_mae
+        elif loss_name == "mape":
+            return util.masked_mape
+        elif loss_name == "rmse":
+            return util.masked_rmse
+        else:
+            raise ValueError(f"Unsupported loss: {loss_name}")
 
     def _prepare_target(self, pred, real_val):
         real = real_val.to(self.device)
@@ -88,8 +98,6 @@ class TrainerADTTP:
         return real
 
     def _unpack_batch(self, batch_or_q, a=None, real_val=None, lengths=None):
-        # nowy format z DataLoadera:
-        # {"x": {"q": ..., "a": ...}, "y": ...}
         if isinstance(batch_or_q, dict) and "x" in batch_or_q and "y" in batch_or_q:
             x = batch_or_q["x"]
             q = x["q"]
@@ -101,8 +109,15 @@ class TrainerADTTP:
 
             return q, a, real_val, lengths
 
-        # stary format: train(q, a, real_val, lengths)
         return batch_or_q, a, real_val, lengths
+
+    def _compute_metrics(self, pred, real, loss_value):
+        return {
+            "loss": loss_value.item(),
+            "mae": util.masked_mae(pred, real, 0.0).item(),
+            "mape": util.masked_mape(pred, real, 0.0).item(),
+            "rmse": util.masked_rmse(pred, real, 0.0).item(),
+        }
 
     def train(self, batch_or_q, a=None, real_val=None, lengths=None):
         self.model.train()
@@ -134,10 +149,7 @@ class TrainerADTTP:
 
         self.optimizer.step()
 
-        mape = util.masked_mape(pred, real, 0.0).item()
-        rmse = util.masked_rmse(pred, real, 0.0).item()
-
-        return loss.item(), mape, rmse
+        return self._compute_metrics(pred, real, loss)
 
     @torch.no_grad()
     def eval(self, batch_or_q, a=None, real_val=None, lengths=None):
@@ -162,8 +174,5 @@ class TrainerADTTP:
         real = self._prepare_target(pred, real_val)
 
         loss = self.loss(pred, real, 0.0)
-        mape = util.masked_mape(pred, real, 0.0).item()
-        rmse = util.masked_rmse(pred, real, 0.0).item()
 
-        return loss.item(), mape, rmse
-
+        return self._compute_metrics(pred, real, loss)
