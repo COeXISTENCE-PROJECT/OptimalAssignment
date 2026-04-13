@@ -633,6 +633,43 @@ def maybe_inverse_transform(scaler, x):
         return x
     return scaler.inverse_transform(x)
 
+def init_metric_acc():
+    return {
+        "loss": 0.0,
+        "mae": 0.0,
+        "mape": 0.0,
+        "rmse": 0.0,
+        "n": 0,
+    }
+
+
+def update_metric_acc(acc, metrics, batch):
+    bs = batch["y"].size(0)
+
+    acc["loss"] += metrics["loss"] * bs
+    acc["mae"] += metrics["mae"] * bs
+    acc["mape"] += metrics["mape"] * bs
+    acc["rmse"] += metrics["rmse"] * bs
+    acc["n"] += bs
+
+
+def finalize_metric_acc(acc):
+    n = max(acc["n"], 1)
+    return {
+        "loss": acc["loss"] / n,
+        "mae": acc["mae"] / n,
+        "mape": acc["mape"] / n,
+        "rmse": acc["rmse"] / n,
+    }
+
+
+def evaluate_loader(engine, loader):
+    acc = init_metric_acc()
+    for batch in loader:
+        metrics = engine.eval(batch)
+        update_metric_acc(acc, metrics, batch)
+    return finalize_metric_acc(acc)
+
 
 def main():
     device = torch.device(args.device)
@@ -768,93 +805,73 @@ def main():
     history = {
         'epoch': [],
         'loss_name': [],
-        'monitor_name': [],
-        'train_loss': [],
-        'train_mae': [],
-        'train_mape': [],
-        'train_rmse': [],
-        'valid_loss': [],
-        'valid_mae': [],
-        'valid_mape': [],
-        'valid_rmse': [],
-        'monitor_value': [],
-        'train_time': [],
-        'val_time': []
+        'train_loss': [], 'train_mae': [], 'train_mape': [], 'train_rmse': [],
+        'valid_loss': [], 'valid_mae': [], 'valid_mape': [], 'valid_rmse': [],
+        'train_time': [], 'val_time': []
     }
+
     monitor_history = []
 
     for i in range(1, args.epochs + 1):
         history['loss_name'].append(args.loss)
-        history['monitor_name'].append(args.monitor)
 
-        train_loss = []
-        train_mae = []
-        train_mape = []
-        train_rmse = []
-
+        train_acc = init_metric_acc()
         t1 = time.time()
 
         for iter_idx, batch in enumerate(train_loader):
             metrics = engine.train(batch)
-
-            train_loss.append(metrics["loss"])
-            train_mae.append(metrics["mae"])
-            train_mape.append(metrics["mape"])
-            train_rmse.append(metrics["rmse"])
+            update_metric_acc(train_acc, metrics, batch)
 
             if iter_idx % args.print_every == 0:
                 log = (
-                    f'Iter: {{:03d}}, '
-                    f'Train LOSS[{args.loss.upper()}]: {{:.4f}}, '
-                    f'Train MAE: {{:.4f}}, Train MAPE: {{:.4f}}, Train RMSE: {{:.4f}}'
+                    'Iter: {:03d}, '
+                    'Train LOSS[{}]: {:.4f}, Train MAE: {:.4f}, '
+                    'Train MAPE: {:.4f}, Train RMSE: {:.4f}'
                 )
                 print(
                     log.format(
                         iter_idx,
-                        train_loss[-1],
-                        train_mae[-1],
-                        train_mape[-1],
-                        train_rmse[-1],
+                        args.loss.upper(),
+                        metrics["loss"],
+                        metrics["mae"],
+                        metrics["mape"],
+                        metrics["rmse"],
                     ),
                     flush=True
                 )
 
         t2 = time.time()
 
-        valid_loss = []
-        valid_mae = []
-        valid_mape = []
-        valid_rmse = []
-
         s1 = time.time()
-        for batch in val_loader:
-            metrics = engine.eval(batch)
-
-            valid_loss.append(metrics["loss"])
-            valid_mae.append(metrics["mae"])
-            valid_mape.append(metrics["mape"])
-            valid_rmse.append(metrics["rmse"])
+        valid_metrics = evaluate_loader(engine, val_loader)
         s2 = time.time()
 
         print('Epoch: {:03d}, Inference Time: {:.4f} secs'.format(i, (s2 - s1)))
 
-        mtrain_loss = np.mean(train_loss)
-        mtrain_mae = np.mean(train_mae)
-        mtrain_mape = np.mean(train_mape)
-        mtrain_rmse = np.mean(train_rmse)
 
-        mvalid_loss = np.mean(valid_loss)
-        mvalid_mae = np.mean(valid_mae)
-        mvalid_mape = np.mean(valid_mape)
-        mvalid_rmse = np.mean(valid_rmse)
+        train_metrics = finalize_metric_acc(train_acc)
 
-        valid_summary = {
-            "loss": mvalid_loss,
-            "mae": mvalid_mae,
-            "mape": mvalid_mape,
-            "rmse": mvalid_rmse,
-        }
-        monitor_value = valid_summary[args.monitor]
+        mtrain_loss = train_metrics["loss"]
+        mtrain_mae = train_metrics["mae"]
+        mtrain_mape = train_metrics["mape"]
+        mtrain_rmse = train_metrics["rmse"]
+
+        mvalid_loss = valid_metrics["loss"]
+        mvalid_mae = valid_metrics["mae"]
+        mvalid_mape = valid_metrics["mape"]
+        mvalid_rmse = valid_metrics["rmse"]
+
+        if args.monitor == 'loss':
+            monitor_value = mvalid_loss
+        elif args.monitor == 'mae':
+            monitor_value = mvalid_mae
+        elif args.monitor == 'mape':
+            monitor_value = mvalid_mape
+        elif args.monitor == 'rmse':
+            monitor_value = mvalid_rmse
+        else:
+            raise ValueError(f"Unsupported monitor: {args.monitor}")
+
         monitor_history.append(monitor_value)
 
         history['epoch'].append(i)
@@ -866,22 +883,21 @@ def main():
         history['valid_mae'].append(mvalid_mae)
         history['valid_mape'].append(mvalid_mape)
         history['valid_rmse'].append(mvalid_rmse)
-        history['monitor_value'].append(monitor_value)
         history['train_time'].append(t2 - t1)
         history['val_time'].append(s2 - s1)
 
         log = (
-            f'Epoch: {{:03d}}, '
-            f'Train LOSS[{args.loss.upper()}]: {{:.4f}}, Train MAE: {{:.4f}}, Train MAPE: {{:.4f}}, Train RMSE: {{:.4f}}, '
-            f'Valid LOSS[{args.loss.upper()}]: {{:.4f}}, Valid MAE: {{:.4f}}, Valid MAPE: {{:.4f}}, Valid RMSE: {{:.4f}}, '
-            f'Monitor[{args.monitor.upper()}]: {{:.4f}}, Training Time: {{:.4f}}/epoch'
+            'Epoch: {:03d}, '
+            'Train LOSS[{}]: {:.4f}, Train MAE: {:.4f}, Train MAPE: {:.4f}, Train RMSE: {:.4f}, '
+            'Valid LOSS[{}]: {:.4f}, Valid MAE: {:.4f}, Valid MAPE: {:.4f}, Valid RMSE: {:.4f}, '
+            'Monitor[{}]: {:.4f}, Training Time: {:.4f}/epoch'
         )
         print(
             log.format(
                 i,
-                mtrain_loss, mtrain_mae, mtrain_mape, mtrain_rmse,
-                mvalid_loss, mvalid_mae, mvalid_mape, mvalid_rmse,
-                monitor_value,
+                args.loss.upper(), mtrain_loss, mtrain_mae, mtrain_mape, mtrain_rmse,
+                args.loss.upper(), mvalid_loss, mvalid_mae, mvalid_mape, mvalid_rmse,
+                args.monitor.upper(), monitor_value,
                 (t2 - t1)
             ),
             flush=True
@@ -904,34 +920,32 @@ def main():
     df_metrics.to_csv(csv_path, index=False)
     print(f"Statistics saved to: {csv_path}")
 
-    fig, axes = plt.subplots(1, 4, figsize=(24, 5))
+    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
     epochs_range = history['epoch']
 
-    loss_label = args.loss.upper()
-
-    axes[0].plot(epochs_range, history['train_loss'], label=f'Train LOSS[{loss_label}]', color='blue')
-    axes[0].plot(epochs_range, history['valid_loss'], label=f'Valid LOSS[{loss_label}]', color='orange')
-    axes[0].set_title(f'Optimization Loss ({loss_label})')
+    axes[0].plot(epochs_range, history['train_loss'], label=f'Train LOSS[{args.loss.upper()}]')
+    axes[0].plot(epochs_range, history['valid_loss'], label=f'Valid LOSS[{args.loss.upper()}]')
+    axes[0].set_title(f'Optimization Loss ({args.loss.upper()})')
     axes[0].set_xlabel('Epoch')
     axes[0].legend()
     axes[0].grid(True, linestyle='--', alpha=0.7)
 
-    axes[1].plot(epochs_range, history['train_mae'], label='Train MAE', color='blue')
-    axes[1].plot(epochs_range, history['valid_mae'], label='Valid MAE', color='orange')
+    axes[1].plot(epochs_range, history['train_mae'], label='Train MAE')
+    axes[1].plot(epochs_range, history['valid_mae'], label='Valid MAE')
     axes[1].set_title('MAE')
     axes[1].set_xlabel('Epoch')
     axes[1].legend()
     axes[1].grid(True, linestyle='--', alpha=0.7)
 
-    axes[2].plot(epochs_range, history['train_mape'], label='Train MAPE', color='blue')
-    axes[2].plot(epochs_range, history['valid_mape'], label='Valid MAPE', color='orange')
+    axes[2].plot(epochs_range, history['train_mape'], label='Train MAPE')
+    axes[2].plot(epochs_range, history['valid_mape'], label='Valid MAPE')
     axes[2].set_title('MAPE')
     axes[2].set_xlabel('Epoch')
     axes[2].legend()
     axes[2].grid(True, linestyle='--', alpha=0.7)
 
-    axes[3].plot(epochs_range, history['train_rmse'], label='Train RMSE', color='blue')
-    axes[3].plot(epochs_range, history['valid_rmse'], label='Valid RMSE', color='orange')
+    axes[3].plot(epochs_range, history['train_rmse'], label='Train RMSE')
+    axes[3].plot(epochs_range, history['valid_rmse'], label='Valid RMSE')
     axes[3].set_title('RMSE')
     axes[3].set_xlabel('Epoch')
     axes[3].legend()
@@ -943,78 +957,26 @@ def main():
     plt.close()
     print(f"saved learning curves to: {plot_path}")
 
+    # -------------------------
+    # TEST
+    # -------------------------
     bestid = np.argmin(monitor_history)
     best_path = args.save + "_epoch_" + str(bestid + 1) + "_" + str(round(monitor_history[bestid], 4)) + ".pth"
     engine.model.load_state_dict(torch.load(best_path, map_location=device))
 
-    outputs = []
-    targets = []
-
-    engine.model.eval()
-    for batch in test_loader:
-        x = batch["x"]
-        y = batch["y"].to(device)
-
-        x = {
-            k: (v.to(device) if torch.is_tensor(v) else v)
-            for k, v in x.items()
-        }
-
-        with torch.no_grad():
-            preds = engine.model(x)
-
-        preds = maybe_inverse_transform(scaler, preds)
-
-        outputs.append(preds.detach().cpu())
-        targets.append(y.detach().cpu())
-
-    yhat = torch.cat(outputs, dim=0)
-    realy = torch.cat(targets, dim=0)
-
     print("Training finished")
-    print(f"Best checkpoint selected by VALID {args.monitor.upper()}: {monitor_history[bestid]:.4f}")
-    print(f"Optimization loss used during training: {args.loss.upper()}")
+    print("Best checkpoint selected by VALID {}: {:.4f}".format(args.monitor.upper(), monitor_history[bestid]))
+    print("Optimization loss used during training: {}".format(args.loss.upper()))
 
-    # one-step: (B, N)
-    if yhat.dim() == 2:
-        pred = yhat
-        real = realy
-        metrics = util.metric(pred, real)
-        print(
-            'Test MAE: {:.4f}, Test MAPE: {:.4f}, Test RMSE: {:.4f}'.format(
-                metrics[0], metrics[1], metrics[2]
-            )
+    test_metrics = evaluate_loader(engine, test_loader)
+
+    print(
+        'Test MAE: {:.4f}, Test MAPE: {:.4f}, Test RMSE: {:.4f}'.format(
+            test_metrics["mae"],
+            test_metrics["mape"],
+            test_metrics["rmse"],
         )
-
-    # multi-step: (B, H, N)
-    elif yhat.dim() == 3:
-        amae = []
-        amape = []
-        armse = []
-
-        for h in range(yhat.size(1)):
-            pred = yhat[:, h, :]
-            real = realy[:, h, :]
-            metrics = util.metric(pred, real)
-
-            print(
-                'Evaluate best model on test data for horizon {:d}, Test MAE: {:.4f}, Test MAPE: {:.4f}, Test RMSE: {:.4f}'.format(
-                    h + 1, metrics[0], metrics[1], metrics[2]
-                )
-            )
-
-            amae.append(metrics[0])
-            amape.append(metrics[1])
-            armse.append(metrics[2])
-
-        print(
-            'On average over {:d} horizons, Test MAE: {:.4f}, Test MAPE: {:.4f}, Test RMSE: {:.4f}'.format(
-                yhat.size(1), np.mean(amae), np.mean(amape), np.mean(armse)
-            )
-        )
-
-    else:
-        raise ValueError(f"Unsupported prediction shape: {tuple(yhat.shape)}")
+    )
 
     torch.save(
         engine.model.state_dict(),
