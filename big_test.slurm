@@ -16,13 +16,16 @@ q_dir=/scratch/tmp/vec_flows_10s
 a_dir=/scratch/tmp/vec_assignments_10s
 adjdata=hex_adjacency_matrix.csv
 data_root=/scratch/tmp
-save_dir=./garage/metr
+save_root=/scratch/tmp/drozd_runs
+mkdir -p "$save_root"
+run_name=long_training_test$(date +%Y%m%d_%H%M%S)
+save_dir=$save_root/$run_name
 
 # ===== sprzęt / split =====
 device=cuda:0
 seed=42
 train_ratio=0.7
-val_ratio=0.15
+val_ratio=0.1
 
 # ===== sekwencje =====
 seq_length_q=15
@@ -33,14 +36,14 @@ seq_length_y=1
 adjtype=doubletransition      # np. doubletransition / transition / identity
 gcn_bool=1                    # 1=on, 0=off
 aptonly=0                     # 1=on, 0=off
-addaptadj=1                   # 1=on, 0=off
+addaptadj=0                   # 1=on, 0=off
 randomadj=0                   # 1=on, 0=off
 
 # ===== model =====
 in_dim=1
 num_nodes=195
-nhid=32
-dropout=0.3
+nhid=64
+dropout=0.1
 kernel_size=2
 blocks=4
 layers=2
@@ -48,19 +51,19 @@ layers=2
 target_dim=1
 sequence_model=lstm           # lstm / gru
 fuse_method=Attention         # Attention / Concat / MLP
-a_embedding_size=32
+a_embedding_size=64
 a_hidden_size=64
-q_rep_dim=32
+q_rep_dim=64
 fused_dim=64
 mlp_hidden_dim=128
 attention_num_heads=4
-attention_ff_dim=128
+attention_ff_dim=64
 
 # ===== trening =====
-batch_size=16
+batch_size=32
 learning_rate=0.001
 weight_decay=0.0001
-epochs=200
+epochs=500
 print_every=1000
 num_workers=4
 expid=1
