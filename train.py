@@ -13,7 +13,8 @@ from torch.utils.data import DataLoader, Subset
 from pathlib import Path
 import random
 import pandas as pd
-
+import csv
+import json
 # przykładowo:
 # from your_dataset_module import make_qA_loader
 
@@ -48,6 +49,7 @@ parser.add_argument('--mlp_hidden_dim', type=int, default=128)
 parser.add_argument('--attention_num_heads', type=int, default=4)
 parser.add_argument('--attention_ff_dim', type=int, default=128)
 
+parser.add_argument('--target_dim', type=int, default=1, help='output target dimension')
 # dla ADTTP q_in_dim musi być 1
 parser.add_argument('--in_dim', type=int, default=1, help='for ADTTP must be 1')
 parser.add_argument('--num_nodes', type=int, default=195, help='number of nodes')
