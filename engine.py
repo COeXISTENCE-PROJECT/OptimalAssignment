@@ -79,16 +79,6 @@ class TrainerADTTP:
         self.scaler = scaler
         self.clip = 5
 
-    def _get_loss_fn(self, loss_name):
-        if loss_name == "mae":
-            return util.masked_mae
-        elif loss_name == "mape":
-            return util.masked_mape
-        elif loss_name == "rmse":
-            return util.masked_rmse
-        else:
-            raise ValueError(f"Unsupported loss: {loss_name}")
-
     def _prepare_target(self, pred, real_val):
         real = real_val.to(self.device)
 
@@ -96,6 +86,34 @@ class TrainerADTTP:
             real = real.reshape_as(pred)
 
         return real
+
+    def _mae(self, pred, real):
+        return torch.mean(torch.abs(pred - real))
+
+    def _mape(self, pred, real, eps=1e-8):
+        denom = torch.clamp(torch.abs(real), min=eps)
+        return torch.mean(torch.abs((pred - real) / denom))
+
+    def _rmse(self, pred, real):
+        return torch.sqrt(torch.mean((pred - real) ** 2))
+
+    def _get_loss_fn(self, loss_name):
+        if loss_name == "mae":
+            return self._mae
+        elif loss_name == "mape":
+            return self._mape
+        elif loss_name == "rmse":
+            return self._rmse
+        else:
+            raise ValueError(f"Unsupported loss: {loss_name}")
+
+    def _compute_metrics(self, pred, real, loss_value):
+        return {
+            "loss": loss_value.item(),
+            "mae": self._mae(pred, real).item(),
+            "mape": self._mape(pred, real).item(),
+            "rmse": self._rmse(pred, real).item(),
+        }
 
     def _unpack_batch(self, batch_or_q, a=None, real_val=None, lengths=None):
         if isinstance(batch_or_q, dict) and "x" in batch_or_q and "y" in batch_or_q:
@@ -110,14 +128,6 @@ class TrainerADTTP:
             return q, a, real_val, lengths
 
         return batch_or_q, a, real_val, lengths
-
-    def _compute_metrics(self, pred, real, loss_value):
-        return {
-            "loss": loss_value.item(),
-            "mae": util.masked_mae(pred, real, 0.0).item(),
-            "mape": util.masked_mape(pred, real, 0.0).item(),
-            "rmse": util.masked_rmse(pred, real, 0.0).item(),
-        }
 
     def train(self, batch_or_q, a=None, real_val=None, lengths=None):
         self.model.train()
@@ -141,7 +151,7 @@ class TrainerADTTP:
 
         real = self._prepare_target(pred, real_val)
 
-        loss = self.loss(pred, real, 0.0)
+        loss = self.loss(pred, real)
         loss.backward()
 
         if self.clip is not None:
@@ -173,6 +183,6 @@ class TrainerADTTP:
 
         real = self._prepare_target(pred, real_val)
 
-        loss = self.loss(pred, real, 0.0)
+        loss = self.loss(pred, real)
 
         return self._compute_metrics(pred, real, loss)
