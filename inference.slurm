@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=24G
-#SBATCH --output=slurm-infer-%j.out
+#SBATCH --output=slurm-%j.out
 
 set -euo pipefail
 
@@ -21,7 +21,7 @@ adjdata=/home/drozd/OptimalAssignment/hex_adjacency_matrix.csv
 checkpoint=/scratch/tmp/drozd_runs/att_lstm/long_training_test20260413_214315_exp1_best_0.4119.pth
 
 # ===== output =====
-out_root=/scratch/tmp/infer_runs/att_lstm
+out_root=/scratch/tmp/infer_runs/att_lstm_test
 mkdir -p "$out_root"
 run_name=infer_$(date +%Y%m%d_%H%M%S)
 output_dir=$out_root/$run_name
@@ -51,12 +51,12 @@ blocks=4
 layers=2
 
 a_embedding_size=32
-a_hidden_size=64
+a_hidden_size=32
 q_rep_dim=32
-fused_dim=64
+fused_dim=32
 mlp_hidden_dim=128
 attention_num_heads=4
-attention_ff_dim=128
+attention_ff_dim=32
 
 # ===== wybór pliku testowego =====
 # Opcja A: wybierz po indeksie w test split
@@ -65,7 +65,7 @@ test_index=1
 # Opcja B: zamiast test_index możesz podać konkretną nazwę pliku:
 # file_name=some_test_file.npy
 
-$python_bin infer_one_test_sequence.py \
+$python_bin inference.py \
   --q_dir "$q_dir" \
   --a_dir "$a_dir" \
   --adjdata "$adjdata" \
