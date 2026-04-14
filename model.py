@@ -114,6 +114,17 @@ class fuse(nn.Module):
             output = output + q                    #residual connection
             output = self.out_proj(output)
 
+
+        elif self.method == 'wavenet_only:':
+            fused = torch.cat([Q], dim=-1)
+            output = self.mlp(fused)
+
+
+        elif self.method == 'assignment_only':
+            fused = torch.cat([A], dim=-1)
+            output = self.mlp(fused)
+
+
         else:
             raise RuntimeError(
                 f"fuse.forward reached unsupported method={self.method!r}"
