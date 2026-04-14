@@ -39,7 +39,7 @@ parser.add_argument('--addaptadj', action='store_true', help='whether add adapti
 parser.add_argument('--randomadj', action='store_true', help='whether random initialize adaptive adj')
 
 parser.add_argument('--sequence_model', type=str, default='lstm', choices=['lstm', 'gru', 'attention'])
-parser.add_argument('--fuse_method', type=str, default='Attention', choices=['concatenate', 'Attention'])
+parser.add_argument('--fuse_method', type=str, default='Attention', choices=['concatenate', 'Attention', 'wavenet_only', 'assignment_only'])
 parser.add_argument('--fused_dim', type=int, default=64)
 parser.add_argument('--a_embedding_size', type=int, default=32)
 parser.add_argument('--a_hidden_size', type=int, default=64)
