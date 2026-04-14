@@ -52,6 +52,8 @@ class fuse(nn.Module):
             'concatenate': 'concatenate',
             'hadamard': 'Hadamard',
             'attention': 'Attention',
+            'wavenet_only' : 'wavenet_only',
+            'assignment_only' : 'assignment_only',
         }.get(method.lower(), method)
 
         self.method = canonical_method
