@@ -52,11 +52,12 @@ class fuse(nn.Module):
             'concatenate': 'concatenate',
             'hadamard': 'Hadamard',
             'attention': 'Attention',
-            'wavenet_only' : 'wavenet_only',
-            'assignment_only' : 'assignment_only',
+            'wavenet_only': 'wavenet_only',
+            'assignment_only': 'assignment_only',
         }.get(method.lower(), method)
 
         self.method = canonical_method
+        self.output_dim = output_dim
 
         if self.method == 'concatenate':
             self.mlp = nn.Sequential(
@@ -80,6 +81,17 @@ class fuse(nn.Module):
 
             self.out_proj = nn.Linear(output_dim, output_dim)
 
+        elif self.method == 'wavenet_only':
+            self.q_only_proj = nn.Sequential(
+                nn.Linear(dim_Q, output_dim),
+                nn.ReLU(),
+            )
+
+        elif self.method == 'assignment_only':
+            self.a_only_proj = nn.Sequential(
+                nn.Linear(dim_A, output_dim),
+                nn.ReLU(),
+            )
 
         else:
             raise ValueError(f"Unknown fuse method: {method}")
@@ -100,11 +112,11 @@ class fuse(nn.Module):
             output = q * a
 
         elif self.method == 'Attention':
-            q = self.q_proj(Q)                     # (B, D)
-            a = self.a_proj(A)                     # (B, D)
+            q = self.q_proj(Q)                      # (B, D)
+            a = self.a_proj(A)                      # (B, D)
 
-            query = q.unsqueeze(1)                 # (B, 1, D)
-            key_value = torch.stack([q, a], dim=1) # (B, 2, D)
+            query = q.unsqueeze(1)                  # (B, 1, D)
+            key_value = torch.stack([q, a], dim=1)  # (B, 2, D)
 
             output, _ = self.attention(
                 query=query,
@@ -112,29 +124,19 @@ class fuse(nn.Module):
                 value=key_value,
             )
 
-            output = output.squeeze(1)             # (B, D)
-            output = output + q                    #residual connection
+            output = output.squeeze(1)              # (B, D)
+            output = output + q                     # residual
             output = self.out_proj(output)
 
-
-        elif self.method == 'wavenet_only:':
-            fused = torch.cat([Q], dim=-1)
-            output = self.mlp(fused)
-
+        elif self.method == 'wavenet_only':
+            output = self.q_only_proj(Q)
 
         elif self.method == 'assignment_only':
-            fused = torch.cat([A], dim=-1)
-            output = self.mlp(fused)
-
+            output = self.a_only_proj(A)
 
         else:
             raise RuntimeError(
                 f"fuse.forward reached unsupported method={self.method!r}"
-            )
-
-        if output is None:
-            raise RuntimeError(
-                f"fuse.forward produced None for method={self.method!r}"
             )
 
         return output
