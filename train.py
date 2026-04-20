@@ -29,8 +29,20 @@ parser.add_argument('--seq_length_q', type=int, default=15, help='q history leng
 parser.add_argument('--seq_length_a', type=int, default=30, help='a history length')
 parser.add_argument('--seq_length_y', type=int, default=1, help='prediction horizon length')
 
-parser.add_argument('--loss', type=str, default='mae', choices=['mae', 'mape', 'rmse'], help='loss used for optimization')
-parser.add_argument('--monitor',type=str,default='loss',choices=['loss', 'mae', 'mape', 'rmse'],help='metric used to select best checkpoint')
+parser.add_argument(
+    '--loss',
+    type=str,
+    default='mae',
+    choices=['mae', 'mape', 'rmse', 'adj_mape', 'flow_cons'],
+    help='loss used for optimization'
+)
+parser.add_argument(
+    '--monitor',
+    type=str,
+    default='loss',
+    choices=['loss', 'mae', 'mape', 'rmse', 'adj_mape', 'flow_cons'],
+    help='metric used to select best checkpoint'
+)
 parser.add_argument('--adjdata', type=str, default=None, help='adj data path')
 parser.add_argument('--adjtype', type=str, default='doubletransition', help='adj type')
 parser.add_argument('--gcn_bool', action='store_true', help='whether to add graph convolution layer')
@@ -633,12 +645,32 @@ def maybe_inverse_transform(scaler, x):
         return x
     return scaler.inverse_transform(x)
 
+def adjusted_mape(pred, real, offset=1.0):
+    return torch.mean(torch.abs(pred - real) / (torch.abs(real) + offset))
+
+
+def flow_conservation(pred, real, offset=1.0):
+    if pred.dim() == 2:
+        # (B, N)
+        pred_sum = pred.sum(dim=1)
+        real_sum = real.sum(dim=1)
+    elif pred.dim() == 3:
+        # (B, H, N)
+        pred_sum = pred.sum(dim=2)
+        real_sum = real.sum(dim=2)
+    else:
+        raise ValueError(f"Unsupported prediction shape for flow_conservation: {tuple(pred.shape)}")
+
+    return torch.mean(torch.abs(pred_sum - real_sum) / (torch.abs(real_sum) + offset))
+
 def init_metric_acc():
     return {
         "loss": 0.0,
         "mae": 0.0,
         "mape": 0.0,
         "rmse": 0.0,
+        "adj_mape": 0.0,
+        "flow_cons": 0.0,
         "n": 0,
     }
 
@@ -650,6 +682,8 @@ def update_metric_acc(acc, metrics, batch):
     acc["mae"] += metrics["mae"] * bs
     acc["mape"] += metrics["mape"] * bs
     acc["rmse"] += metrics["rmse"] * bs
+    acc["adj_mape"] += metrics["adj_mape"] * bs
+    acc["flow_cons"] += metrics["flow_cons"] * bs
     acc["n"] += bs
 
 
@@ -660,8 +694,9 @@ def finalize_metric_acc(acc):
         "mae": acc["mae"] / n,
         "mape": acc["mape"] / n,
         "rmse": acc["rmse"] / n,
+        "adj_mape": acc["adj_mape"] / n,
+        "flow_cons": acc["flow_cons"] / n,
     }
-
 
 def evaluate_loader(engine, loader):
     acc = init_metric_acc()
@@ -805,8 +840,10 @@ def main():
     history = {
         'epoch': [],
         'loss_name': [],
-        'train_loss': [], 'train_mae': [], 'train_mape': [], 'train_rmse': [],
-        'valid_loss': [], 'valid_mae': [], 'valid_mape': [], 'valid_rmse': [],
+        'train_loss': [], 'train_mae': [], 'train_mape': [], 'train_rmse': [], 'train_adj_mape': [],
+        'train_flow_cons': [],
+        'valid_loss': [], 'valid_mae': [], 'valid_mape': [], 'valid_rmse': [], 'valid_adj_mape': [],
+        'valid_flow_cons': [],
         'train_time': [], 'val_time': []
     }
 
@@ -826,7 +863,8 @@ def main():
                 log = (
                     'Iter: {:03d}, '
                     'Train LOSS[{}]: {:.4f}, Train MAE: {:.4f}, '
-                    'Train MAPE: {:.4f}, Train RMSE: {:.4f}'
+                    'Train MAPE: {:.4f}, Train RMSE: {:.4f}, '
+                    'Train ADJ_MAPE: {:.4f}, Train FLOW_CONS: {:.4f}'
                 )
                 print(
                     log.format(
@@ -836,6 +874,8 @@ def main():
                         metrics["mae"],
                         metrics["mape"],
                         metrics["rmse"],
+                        metrics["adj_mape"],
+                        metrics["flow_cons"],
                     ),
                     flush=True
                 )
@@ -861,6 +901,12 @@ def main():
         mvalid_mape = valid_metrics["mape"]
         mvalid_rmse = valid_metrics["rmse"]
 
+        mtrain_adj_mape = train_metrics["adj_mape"]
+        mtrain_flow_cons = train_metrics["flow_cons"]
+
+        mvalid_adj_mape = valid_metrics["adj_mape"]
+        mvalid_flow_cons = valid_metrics["flow_cons"]
+
         if args.monitor == 'loss':
             monitor_value = mvalid_loss
         elif args.monitor == 'mae':
@@ -869,6 +915,10 @@ def main():
             monitor_value = mvalid_mape
         elif args.monitor == 'rmse':
             monitor_value = mvalid_rmse
+        elif args.monitor == 'adj_mape':
+            monitor_value = mvalid_adj_mape
+        elif args.monitor == 'flow_cons':
+            monitor_value = mvalid_flow_cons
         else:
             raise ValueError(f"Unsupported monitor: {args.monitor}")
 
@@ -885,18 +935,22 @@ def main():
         history['valid_rmse'].append(mvalid_rmse)
         history['train_time'].append(t2 - t1)
         history['val_time'].append(s2 - s1)
+        history['train_adj_mape'].append(mtrain_adj_mape)
+        history['train_flow_cons'].append(mtrain_flow_cons)
+        history['valid_adj_mape'].append(mvalid_adj_mape)
+        history['valid_flow_cons'].append(mvalid_flow_cons)
 
         log = (
             'Epoch: {:03d}, '
-            'Train LOSS[{}]: {:.4f}, Train MAE: {:.4f}, Train MAPE: {:.4f}, Train RMSE: {:.4f}, '
-            'Valid LOSS[{}]: {:.4f}, Valid MAE: {:.4f}, Valid MAPE: {:.4f}, Valid RMSE: {:.4f}, '
+            'Train LOSS[{}]: {:.4f}, Train MAE: {:.4f}, Train MAPE: {:.4f}, Train RMSE: {:.4f}, Train ADJ_MAPE: {:.4f}, Train FLOW_CONS: {:.4f}, '
+            'Valid LOSS[{}]: {:.4f}, Valid MAE: {:.4f}, Valid MAPE: {:.4f}, Valid RMSE: {:.4f}, Valid ADJ_MAPE: {:.4f}, Valid FLOW_CONS: {:.4f}, '
             'Monitor[{}]: {:.4f}, Training Time: {:.4f}/epoch'
         )
         print(
             log.format(
                 i,
-                args.loss.upper(), mtrain_loss, mtrain_mae, mtrain_mape, mtrain_rmse,
-                args.loss.upper(), mvalid_loss, mvalid_mae, mvalid_mape, mvalid_rmse,
+                args.loss.upper(), mtrain_loss, mtrain_mae, mtrain_mape, mtrain_rmse, mtrain_adj_mape, mtrain_flow_cons,
+                args.loss.upper(), mvalid_loss, mvalid_mae, mvalid_mape, mvalid_rmse, mvalid_adj_mape, mvalid_flow_cons,
                 args.monitor.upper(), monitor_value,
                 (t2 - t1)
             ),
@@ -920,7 +974,7 @@ def main():
     df_metrics.to_csv(csv_path, index=False)
     print(f"Statistics saved to: {csv_path}")
 
-    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+    fig, axes = plt.subplots(1, 6, figsize=(30, 5))
     epochs_range = history['epoch']
 
     axes[0].plot(epochs_range, history['train_loss'], label=f'Train LOSS[{args.loss.upper()}]')
@@ -951,6 +1005,20 @@ def main():
     axes[3].legend()
     axes[3].grid(True, linestyle='--', alpha=0.7)
 
+    axes[4].plot(epochs_range, history['train_adj_mape'], label='Train ADJ_MAPE')
+    axes[4].plot(epochs_range, history['valid_adj_mape'], label='Valid ADJ_MAPE')
+    axes[4].set_title('ADJ_MAPE')
+    axes[4].set_xlabel('Epoch')
+    axes[4].legend()
+    axes[4].grid(True, linestyle='--', alpha=0.7)
+
+    axes[5].plot(epochs_range, history['train_flow_cons'], label='Train FLOW_CONS')
+    axes[5].plot(epochs_range, history['valid_flow_cons'], label='Valid FLOW_CONS')
+    axes[5].set_title('FLOW_CONS')
+    axes[5].set_xlabel('Epoch')
+    axes[5].legend()
+    axes[5].grid(True, linestyle='--', alpha=0.7)
+
     plt.tight_layout()
     plot_path = os.path.join(data_out_dir, "learning_curves.png")
     plt.savefig(plot_path, dpi=300)
@@ -971,10 +1039,12 @@ def main():
     test_metrics = evaluate_loader(engine, test_loader)
 
     print(
-        'Test MAE: {:.4f}, Test MAPE: {:.4f}, Test RMSE: {:.4f}'.format(
+        'Test MAE: {:.4f}, Test MAPE: {:.4f}, Test RMSE: {:.4f}, Test ADJ_MAPE: {:.4f}, Test FLOW_CONS: {:.4f}'.format(
             test_metrics["mae"],
             test_metrics["mape"],
             test_metrics["rmse"],
+            test_metrics["adj_mape"],
+            test_metrics["flow_cons"],
         )
     )
 

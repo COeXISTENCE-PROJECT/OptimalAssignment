@@ -97,6 +97,21 @@ class TrainerADTTP:
     def _rmse(self, pred, real):
         return torch.sqrt(torch.mean((pred - real) ** 2))
 
+    def _adj_mape(self, pred, real, offset=1.0):
+        return torch.mean(torch.abs(pred - real) / (torch.abs(real) + offset))
+
+    def _flow_cons(self, pred, real, offset=1.0):
+        # Dla:
+        # (B, N)    -> sumujemy po węzłach
+        # (B, H, N) -> sumujemy po węzłach w każdej chwili h
+        if pred.dim() not in (2, 3):
+            raise ValueError(f"Unsupported shape for flow_cons: {tuple(pred.shape)}")
+
+        pred_sum = pred.sum(dim=-1)
+        real_sum = real.sum(dim=-1)
+
+        return torch.mean(torch.abs(pred_sum - real_sum) / (torch.abs(real_sum) + offset))
+
     def _get_loss_fn(self, loss_name):
         if loss_name == "mae":
             return self._mae
@@ -104,6 +119,10 @@ class TrainerADTTP:
             return self._mape
         elif loss_name == "rmse":
             return self._rmse
+        elif loss_name == "adj_mape":
+            return self._adj_mape
+        elif loss_name == "flow_cons":
+            return self._flow_cons
         else:
             raise ValueError(f"Unsupported loss: {loss_name}")
 
@@ -113,6 +132,8 @@ class TrainerADTTP:
             "mae": self._mae(pred, real).item(),
             "mape": self._mape(pred, real).item(),
             "rmse": self._rmse(pred, real).item(),
+            "adj_mape": self._adj_mape(pred, real).item(),
+            "flow_cons": self._flow_cons(pred, real).item(),
         }
 
     def _unpack_batch(self, batch_or_q, a=None, real_val=None, lengths=None):
