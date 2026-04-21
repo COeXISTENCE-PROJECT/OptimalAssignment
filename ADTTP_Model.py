@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-
+import torch.nn.functional as F
 from model import (
     GraphWaveNetBackbone,
     LSTM_Representation,
@@ -199,6 +199,23 @@ class ADTTP(nn.Module):
             )
         return supports
 
+    def _init_output_heads(self):
+        reg_last = self.reg_head[-1]
+        gate_last = self.gate_head[-1]
+
+        if not isinstance(reg_last, nn.Linear):
+            raise TypeError("Expected last layer of reg_head to be nn.Linear")
+        if not isinstance(gate_last, nn.Linear):
+            raise TypeError("Expected last layer of gate_head to be nn.Linear")
+
+        # regresja: małe wagi + ujemny bias, żeby softplus dawał wartości bliskie 0
+        nn.init.normal_(reg_last.weight, mean=0.0, std=1e-3)
+        nn.init.constant_(reg_last.bias, -4.0)
+
+        # gate: neutralny start albo lekko konserwatywny
+        nn.init.normal_(gate_last.weight, mean=0.0, std=1e-3)
+        nn.init.constant_(gate_last.bias, -1.0)
+
     def encode_q(self, q: torch.Tensor) -> torch.Tensor:
         """
         q: (B, T, N)
@@ -290,16 +307,23 @@ class ADTTP(nn.Module):
         return q, a, lengths, supports
 
     def forward(
-        self,
-        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor] | dict,
-        a: torch.Tensor | None = None,
-        lengths: torch.Tensor | None = None,
-        supports: list[torch.Tensor] | None = None,
-        return_dict: bool = False,
-        use_gate: bool = True,
-        hard_gate: bool = False,
-        gate_threshold: float = 0.5,
+            self,
+            q: torch.Tensor | tuple[torch.Tensor, torch.Tensor] | dict,
+            a: torch.Tensor | None = None,
+            lengths: torch.Tensor | None = None,
+            supports: list[torch.Tensor] | None = None,
+            return_dict: bool = False,
+            use_gate: bool | None = None,
+            hard_gate: bool | None = None,
+            gate_threshold: float | None = None,
     ):
+        if use_gate is None:
+            use_gate = self.default_use_gate
+        if hard_gate is None:
+            hard_gate = self.default_hard_gate
+        if gate_threshold is None:
+            gate_threshold = self.default_gate_threshold
+
         q, a, lengths, supports = self._parse_inputs(q, a, lengths, supports)
 
         q, q_was_unbatched = self._ensure_batch_sequence(q, "q")
@@ -312,18 +336,17 @@ class ADTTP(nn.Module):
 
         lengths = self._normalize_lengths(lengths, batch_size=a.size(0), device=a.device)
 
-        q_repr = self.encode_q(q)  # (B, Dq)
-        a_repr = self.encode_a(a, lengths=lengths, supports=supports)  # (B, Da)
-
-        # fuse z model.py oczekuje tensorów 2D dla wszystkich metod, także "Attention"
+        q_repr = self.encode_q(q)
+        a_repr = self.encode_a(a, lengths=lengths, supports=supports)
         fused = self.fuser(q_repr, a_repr)
 
-        reg_pred = self.reg_head(fused)  # (B, N * target_dim)
-        gate_logits = self.gate_head(fused)  # (B, N)
-        gate_prob = torch.sigmoid(gate_logits)  # (B, N)
+        reg_raw = self.reg_head(fused)  # surowe wyjście regresji
+        gate_logits = self.gate_head(fused)  # surowe logity bramki
+        gate_prob = torch.sigmoid(gate_logits)
 
         if self.target_dim == 1:
-            reg_pred = reg_pred.view(reg_pred.size(0), self.num_nodes)
+            reg_raw = reg_raw.view(reg_raw.size(0), self.num_nodes)
+            reg_pred = F.softplus(reg_raw)
 
             if not use_gate:
                 pred = reg_pred
@@ -334,9 +357,8 @@ class ADTTP(nn.Module):
                 pred = gate_prob * reg_pred
 
         else:
-            reg_pred = reg_pred.view(
-                reg_pred.size(0), self.target_dim, self.num_nodes
-            )
+            reg_raw = reg_raw.view(reg_raw.size(0), self.target_dim, self.num_nodes)
+            reg_pred = F.softplus(reg_raw)
 
             if not use_gate:
                 pred = reg_pred
@@ -350,6 +372,7 @@ class ADTTP(nn.Module):
 
         if was_unbatched:
             pred = pred.squeeze(0)
+            reg_raw = reg_raw.squeeze(0)
             reg_pred = reg_pred.squeeze(0)
             gate_logits = gate_logits.squeeze(0)
             gate_prob = gate_prob.squeeze(0)
@@ -360,6 +383,7 @@ class ADTTP(nn.Module):
         if return_dict:
             return {
                 "pred": pred,
+                "reg_raw": reg_raw,
                 "reg_pred": reg_pred,
                 "gate_logits": gate_logits,
                 "gate_prob": gate_prob,
