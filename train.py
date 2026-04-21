@@ -313,30 +313,7 @@ def main():
     print("test dataset size:", len(test_loader.dataset))
     print("batches per epoch:", len(train_loader))
 
-    # val_loader = make_qA_loader(
-    #     flow_dir="valuation_dict_flow",
-    #     assign_dir="valuation_dict_assign",
-    #     batch_size=args.batch_size,
-    #     shuffle=True,
-    #     num_workers=args.num_workers,
-    #     seq_length_q=15,
-    #     seq_length_a=30,
-    #     seq_length_y=1,
-    #     target_nodes=args.num_nodes,
-    # )
-    # test_loader = make_qA_loader(
-    #     flow_dir="test_dict_flow",
-    #     assign_dir="test_dict_assign",
-    #     batch_size=args.batch_size,
-    #     shuffle=True,
-    #     num_workers=args.num_workers,
-    #     seq_length_q=15,
-    #     seq_length_a=30,
-    #     seq_length_y=1,
-    #     target_nodes=args.num_nodes,
-    # )
-
-    scaler = None  # ustaw swój scaler tutaj tylko jeśli rzeczywiście go masz
+    scaler = None
 
     first_batch = next(iter(train_loader))
     target_dim = infer_target_dim_from_batch(first_batch)
@@ -368,6 +345,7 @@ def main():
         attention_num_heads=args.attention_num_heads,
         attention_ff_dim=args.attention_ff_dim,
         loss_name=args.loss,
+        alpha=args.alpha
     )
 
     print("start training...", flush=True)
