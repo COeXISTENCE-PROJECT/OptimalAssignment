@@ -34,6 +34,7 @@ class TrainerADTTP:
         attention_num_heads=4,
         attention_ff_dim=64,
         loss_name="mae",
+        alpha = "1"
     ):
         self.device = device
 
@@ -74,6 +75,9 @@ class TrainerADTTP:
         )
 
         self.loss_name = loss_name.lower()
+        if not 0.0 <= alpha <= 1.0:
+            raise ValueError(f"alpha must be in [0, 1], got {alpha}")
+        self.alpha = alpha
         self.loss = self._get_loss_fn(self.loss_name)
 
         self.scaler = scaler
@@ -98,12 +102,15 @@ class TrainerADTTP:
         return torch.sqrt(torch.mean((pred - real) ** 2))
 
     def _adj_mape(self, pred, real, offset=1.0):
-        return torch.mean(torch.abs(pred - real) / (torch.abs(real) + offset))
+        return torch.mean(torch.abs(pred - real) / (real + offset))
+
+    def _mae_with_adj_mape(self, pred, real):
+        return (
+            self.alpha * self._mae(pred, real)
+            + (1 - self.alpha) * self._adj_mape(pred, real)
+        )
 
     def _flow_cons(self, pred, real, offset=1.0):
-        # Dla:
-        # (B, N)    -> sumujemy po węzłach
-        # (B, H, N) -> sumujemy po węzłach w każdej chwili h
         if pred.dim() not in (2, 3):
             raise ValueError(f"Unsupported shape for flow_cons: {tuple(pred.shape)}")
 
@@ -114,7 +121,7 @@ class TrainerADTTP:
 
     def _get_loss_fn(self, loss_name):
         if loss_name == "mae":
-            return self._mae
+            return self._mae_with_adj_mape
         elif loss_name == "mape":
             return self._mape
         elif loss_name == "rmse":
@@ -134,6 +141,7 @@ class TrainerADTTP:
             "rmse": self._rmse(pred, real).item(),
             "adj_mape": self._adj_mape(pred, real).item(),
             "flow_cons": self._flow_cons(pred, real).item(),
+            "mae_adj_mape_loss": self._mae_with_adj_mape(pred, real).item(),
         }
 
     def _unpack_batch(self, batch_or_q, a=None, real_val=None, lengths=None):
