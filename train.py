@@ -479,7 +479,7 @@ def main():
     print("Average Inference Time: {:.4f} secs".format(np.mean(history['val_time'])))
 
     save_dir = os.path.dirname(os.path.abspath(args.save))
-    data_out_dir = os.path.join(save_dir, "garage/data")
+    data_out_dir = os.path.join(save_dir, "data")
     os.makedirs(data_out_dir, exist_ok=True)
 
     df_metrics = pd.DataFrame(history)
@@ -533,14 +533,11 @@ def main():
     axes[5].grid(True, linestyle='--', alpha=0.7)
 
     plt.tight_layout()
-    plot_path = os.path.join(data_out_dir, "garage/learning_curves.png")
+    plot_path = os.path.join(data_out_dir, "learning_curves.png")
     plt.savefig(plot_path, dpi=300)
     plt.close()
     print(f"saved learning curves to: {plot_path}")
 
-    # -------------------------
-    # TEST
-    # -------------------------
     bestid = np.argmin(monitor_history)
     best_path = args.save + "_epoch_" + str(bestid + 1) + "_" + str(round(monitor_history[bestid], 4)) + ".pth"
     engine.model.load_state_dict(torch.load(best_path, map_location=device))
