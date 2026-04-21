@@ -52,6 +52,9 @@ class ADTTP(nn.Module):
         attention_num_heads: int = 4,
         attention_ff_dim: int = 64,
         gwnet_kwargs: dict | None = None,
+        default_use_gate=True,
+        default_hard_gate=False,
+        default_gate_threshold=0.5,
     ):
         super().__init__()
 
@@ -70,6 +73,10 @@ class ADTTP(nn.Module):
         self.target_dim = target_dim
         self.supports = supports
         self.sequence_model = sequence_model.lower()
+
+        self.default_use_gate = default_use_gate
+        self.default_hard_gate = default_hard_gate
+        self.default_gate_threshold = default_gate_threshold
 
         canonical_fuse_method = {
             "concatenate": "concatenate",
