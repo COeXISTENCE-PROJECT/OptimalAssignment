@@ -136,11 +136,18 @@ class ADTTP(nn.Module):
             method=canonical_fuse_method,
         )
 
-        self.mlp = nn.Sequential(
+        self.reg_head = nn.Sequential(
             nn.Linear(fused_dim, mlp_hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(mlp_hidden_dim, num_nodes * target_dim),
+        )
+
+        self.gate_head = nn.Sequential(
+            nn.Linear(fused_dim, mlp_hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(mlp_hidden_dim, num_nodes),
         )
 
     @staticmethod
@@ -289,6 +296,9 @@ class ADTTP(nn.Module):
         lengths: torch.Tensor | None = None,
         supports: list[torch.Tensor] | None = None,
         return_dict: bool = False,
+        use_gate: bool = True,
+        hard_gate: bool = False,
+        gate_threshold: float = 0.5,
     ):
         q, a, lengths, supports = self._parse_inputs(q, a, lengths, supports)
 
@@ -308,17 +318,41 @@ class ADTTP(nn.Module):
         # fuse z model.py oczekuje tensorów 2D dla wszystkich metod, także "Attention"
         fused = self.fuser(q_repr, a_repr)
 
-        pred = self.mlp(fused)
+        reg_pred = self.reg_head(fused)  # (B, N * target_dim)
+        gate_logits = self.gate_head(fused)  # (B, N)
+        gate_prob = torch.sigmoid(gate_logits)  # (B, N)
 
         if self.target_dim == 1:
-            pred = pred.view(pred.size(0), self.num_nodes)
+            reg_pred = reg_pred.view(reg_pred.size(0), self.num_nodes)
+
+            if not use_gate:
+                pred = reg_pred
+            elif hard_gate:
+                gate_mask = (gate_prob >= gate_threshold).float()
+                pred = gate_mask * reg_pred
+            else:
+                pred = gate_prob * reg_pred
+
         else:
-            pred = pred.view(pred.size(0), self.target_dim, self.num_nodes)
+            reg_pred = reg_pred.view(
+                reg_pred.size(0), self.target_dim, self.num_nodes
+            )
+
+            if not use_gate:
+                pred = reg_pred
+            elif hard_gate:
+                gate_mask = (gate_prob >= gate_threshold).float().unsqueeze(1)
+                pred = gate_mask * reg_pred
+            else:
+                pred = gate_prob.unsqueeze(1) * reg_pred
 
         was_unbatched = q_was_unbatched and a_was_unbatched
 
         if was_unbatched:
             pred = pred.squeeze(0)
+            reg_pred = reg_pred.squeeze(0)
+            gate_logits = gate_logits.squeeze(0)
+            gate_prob = gate_prob.squeeze(0)
             q_repr = q_repr.squeeze(0)
             a_repr = a_repr.squeeze(0)
             fused = fused.squeeze(0)
@@ -326,8 +360,12 @@ class ADTTP(nn.Module):
         if return_dict:
             return {
                 "pred": pred,
+                "reg_pred": reg_pred,
+                "gate_logits": gate_logits,
+                "gate_prob": gate_prob,
                 "q_repr": q_repr,
                 "a_repr": a_repr,
                 "fused": fused,
             }
+
         return pred
