@@ -6,6 +6,7 @@ import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
+import sys
 
 
 PYTHON_BIN = "/home/drozd/miniconda/envs/wavenet_env/bin/python"
@@ -22,6 +23,8 @@ PIPELINE_ROOT = Path("/scratch/tmp/ADTTP_tests_new")
 RUN_STAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
 RUN_NAME = f"run_{RUN_STAMP}"
 RUN_DIR = PIPELINE_ROOT / RUN_NAME
+RESULTS_DIR = RUN_DIR / "results_summary"
+LOGS_DIR = RUN_DIR / "logs"
 
 # ===== podfoldery jednego runu =====
 TRAIN_PREFIX = RUN_DIR / "training"
@@ -103,10 +106,34 @@ def print_header(title: str):
     print("=" * 90)
 
 
-def run_command(cmd, cwd=None):
+def run_command(cmd, cwd=None, log_file: Path | None = None):
     printable = " ".join(shlex.quote(str(x)) for x in cmd)
     print(f"\n[RUN] {printable}\n")
-    subprocess.run(cmd, cwd=cwd, check=True)
+
+    if log_file is None:
+        subprocess.run(cmd, cwd=cwd, check=True)
+        return
+
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(log_file, "w", encoding="utf-8") as f:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            f.write(line)
+
+        ret = proc.wait()
+        if ret != 0:
+            raise subprocess.CalledProcessError(ret, cmd)
 
 
 def append_bool_flag(cmd: list, flag_name: str, value: bool):
@@ -146,6 +173,75 @@ def find_best_checkpoint(train_dir: Path, expid: int | None = None) -> Path:
     print(f"[WARN] Biorę najnowszy plik: {newest}")
     return newest
 
+def copy_if_exists(src: Path, dst_dir: Path, new_name: str | None = None):
+    src = Path(src)
+    if not src.exists():
+        print(f"[WARN] Nie znaleziono pliku: {src}")
+        return
+
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    dst = dst_dir / (new_name if new_name else src.name)
+    shutil.copy2(src, dst)
+    print(f"[INFO] Skopiowano: {src} -> {dst}")
+
+
+def copy_tree_if_exists(src: Path, dst: Path):
+    src = Path(src)
+    dst = Path(dst)
+
+    if not src.exists():
+        print(f"[WARN] Nie znaleziono katalogu: {src}")
+        return
+
+    if dst.exists():
+        shutil.rmtree(dst)
+
+    shutil.copytree(src, dst)
+    print(f"[INFO] Skopiowano katalog: {src} -> {dst}")
+
+def collect_key_results():
+    training_summary_dir = RESULTS_DIR / "training"
+    inference_summary_dir = RESULTS_DIR / "inference"
+    visual_summary_dir = RESULTS_DIR / "visual"
+    logs_summary_dir = RESULTS_DIR / "logs"
+
+    training_summary_dir.mkdir(parents=True, exist_ok=True)
+    inference_summary_dir.mkdir(parents=True, exist_ok=True)
+    logs_summary_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1) cały visual
+    copy_tree_if_exists(VIS_DIR, visual_summary_dir)
+
+    # 2) najważniejsze rzeczy z treningu
+    copy_if_exists(RUN_DIR / "data" / "learning_curves.png", training_summary_dir)
+    copy_if_exists(RUN_DIR / "data" / "training_metrics.csv", training_summary_dir)
+
+    # 3) jeśli są osobne metryki testowe, też je zbierz
+    for pattern in ["*test*metrics*.csv", "*test*metrics*.json", "*test*.txt"]:
+        for p in RUN_DIR.rglob(pattern):
+            copy_if_exists(p, training_summary_dir)
+
+    # 4) najważniejsze pliki z visual jeszcze raz w jednym miejscu
+    important_visual_files = [
+        "summary.json",
+        "tt_stats.csv",
+        "tt_timeseries.csv",
+        "group_summary.csv",
+        "node_groups.csv",
+        "node_ranking.csv",
+        "time_ranking.csv",
+        "activity_ranking.csv",
+    ]
+    for name in important_visual_files:
+        copy_if_exists(VIS_DIR / name, inference_summary_dir)
+
+    # 5) logi
+    for log_name in ["train.log", "inference.log", "inference_visual.log"]:
+        copy_if_exists(LOGS_DIR / log_name, logs_summary_dir)
+
+    # 6) opcjonalnie checkpoint + config
+    copy_if_exists(RUN_DIR / "checkpoint_best.pth", RESULTS_DIR)
+    copy_if_exists(RUN_DIR / "pipeline_config.json", RESULTS_DIR)
 
 def save_pipeline_config(best_checkpoint: Path | None = None):
     config = {
@@ -233,7 +329,7 @@ def copy_best_checkpoint_to_run_root(best_checkpoint: Path):
 
 def build_train_command():
     cmd = [
-        PYTHON_BIN, "train.py",
+        PYTHON_BIN, "-u", "train.py",
         "--device", DEVICE,
         "--data", DATA_ROOT,
         "--q_dir", Q_DIR,
@@ -283,7 +379,7 @@ def build_train_command():
 
 def build_inference_command(checkpoint_path: Path):
     cmd = [
-        PYTHON_BIN, "inference.py",
+        PYTHON_BIN, "-u","inference.py",
         "--q_dir", Q_DIR,
         "--a_dir", A_DIR,
         "--adjdata", ADJDATA,
@@ -341,7 +437,7 @@ def build_visual_command():
         RUN_DIR / visual
     """
     return [
-        PYTHON_BIN, "inference_visual.py",
+        PYTHON_BIN, "-u", "inference_visual.py",
         "--run_dir", str(INFER_DIR),
         "--output_subdir", "../visual",
         "--top_k_nodes", str(TOP_K_NODES),
@@ -359,6 +455,8 @@ def main():
     ensure_dir(RUN_DIR)
     ensure_dir(INFER_DIR)
     ensure_dir(VIS_DIR)
+    ensure_dir(RESULTS_DIR)
+    ensure_dir(LOGS_DIR)
 
     save_pipeline_config(best_checkpoint=None)
 
@@ -376,7 +474,7 @@ def main():
     # 1. trening
     print_header("ETAP 1: TRENING")
     train_cmd = build_train_command()
-    run_command(train_cmd, cwd=PROJECT_DIR)
+    run_command(train_cmd, cwd=PROJECT_DIR, log_file=LOGS_DIR / "train.log")
 
     # 2. najlepszy checkpoint
     print_header("ETAP 2: WYBÓR CHECKPOINTU")
@@ -389,12 +487,12 @@ def main():
     # 3. inferencja
     print_header("ETAP 3: INFERENCJA")
     infer_cmd = build_inference_command(best_checkpoint)
-    run_command(infer_cmd, cwd=PROJECT_DIR)
+    run_command(infer_cmd, cwd=PROJECT_DIR, log_file=LOGS_DIR / "inference.log")
 
     # 4. wizualizacja
     print_header("ETAP 4: WIZUALIZACJA")
     vis_cmd = build_visual_command()
-    run_command(vis_cmd, cwd=PROJECT_DIR)
+    run_command(vis_cmd, cwd=PROJECT_DIR, og_file=LOGS_DIR / "inference_visual.log")
 
     print_header("PIPELINE ZAKOŃCZONY")
     print(f"[OK] Cały run zapisany w: {RUN_DIR}")
@@ -403,6 +501,9 @@ def main():
     print(f"[OK] Wizualizacje:        {VIS_DIR}")
     print(f"[OK] Best checkpoint:     {RUN_DIR / 'checkpoint_best.pth'}")
     print(f"[OK] Konfiguracja runu:   {RUN_DIR / 'pipeline_config.json'}")
+
+    print_header("ETAP 5: ZBIERANIE KLUCZOWYCH WYNIKÓW")
+    collect_key_results()
 
 
 if __name__ == "__main__":
