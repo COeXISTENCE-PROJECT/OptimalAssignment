@@ -278,11 +278,12 @@ class ADTTP(nn.Module):
         return a_repr
 
     def _parse_inputs(
-        self,
-        q,
-        a=None,
-        lengths=None,
-        supports=None,
+            self,
+            q,
+            a=None,
+            lengths=None,
+            supports=None,
+            a_zeros=None,
     ):
         if isinstance(q, dict):
             batch = q
@@ -292,6 +293,8 @@ class ADTTP(nn.Module):
                 lengths = batch.get("lengths")
             if supports is None:
                 supports = batch.get("supports")
+            if a_zeros is None:
+                a_zeros = batch.get("a_zeros")
 
         elif a is None:
             if isinstance(q, tuple):
@@ -311,7 +314,7 @@ class ADTTP(nn.Module):
                     "or model((q, a), ...)."
                 )
 
-        return q, a, lengths, supports
+        return q, a, lengths, supports, a_zeros
 
     def forward(
             self,
@@ -319,6 +322,7 @@ class ADTTP(nn.Module):
             a: torch.Tensor | None = None,
             lengths: torch.Tensor | None = None,
             supports: list[torch.Tensor] | None = None,
+            a_zeros = None,
             return_dict: bool = False,
             use_gate: bool | None = None,
             hard_gate: bool | None = None,
@@ -331,10 +335,32 @@ class ADTTP(nn.Module):
         if gate_threshold is None:
             gate_threshold = self.default_gate_threshold
 
-        q, a, lengths, supports = self._parse_inputs(q, a, lengths, supports)
+        q, a, lengths, supports, a_zeros = self._parse_inputs(
+            q, a, lengths, supports, a_zeros
+        )
 
         q, q_was_unbatched = self._ensure_batch_sequence(q, "q")
         a, a_was_unbatched = self._ensure_batch_sequence(a, "a")
+
+        if a_zeros is not None:
+            if not torch.is_tensor(a_zeros):
+                a_zeros = torch.as_tensor(a_zeros, device=q.device, dtype=q.dtype)
+            else:
+                a_zeros = a_zeros.to(device=q.device, dtype=q.dtype)
+
+            if a_zeros.dim() == 1:
+                a_zeros = a_zeros.unsqueeze(0)  # (N,) -> (1, N)
+
+            if a_zeros.dim() != 2:
+                raise ValueError(
+                    f"a_zeros must have shape (B, N) or (N,), got {tuple(a_zeros.shape)}"
+                )
+
+            if a_zeros.size(0) != q.size(0) or a_zeros.size(1) != self.num_nodes:
+                raise ValueError(
+                    f"a_zeros must have shape ({q.size(0)}, {self.num_nodes}), "
+                    f"got {tuple(a_zeros.shape)}"
+                )
 
         if q.size(0) != a.size(0):
             raise ValueError(
@@ -363,6 +389,9 @@ class ADTTP(nn.Module):
             else:
                 pred = gate_prob * reg_pred
 
+            if a_zeros is not None:
+                pred = pred * a_zeros
+
         else:
             reg_raw = reg_raw.view(reg_raw.size(0), self.target_dim, self.num_nodes)
             reg_pred = F.softplus(reg_raw)
@@ -374,6 +403,10 @@ class ADTTP(nn.Module):
                 pred = gate_mask * reg_pred
             else:
                 pred = gate_prob.unsqueeze(1) * reg_pred
+
+            if a_zeros is not None:
+                pred = pred * a_zeros.unsqueeze(1)
+
 
         was_unbatched = q_was_unbatched and a_was_unbatched
 
