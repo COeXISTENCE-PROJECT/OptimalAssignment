@@ -231,7 +231,7 @@ def main():
     parser.add_argument("--sequence_model", type=str, default="lstm",
                         choices=["lstm", "gru", "attention"])
     parser.add_argument("--fuse_method", type=str, default="Attention",
-                        choices=["concatenate", "Attention"])
+                        choices=["concatenate", "Attention", "wavenet_only", "assignment_only"])
     parser.add_argument("--a_embedding_size", type=int, default=32)
     parser.add_argument("--a_hidden_size", type=int, default=64)
     parser.add_argument("--q_rep_dim", type=int, default=32)

@@ -12,19 +12,19 @@ PYTHON_BIN = "/home/drozd/miniconda/envs/wavenet_env/bin/python"
 PROJECT_DIR = Path("/home/drozd/OptimalAssignment").resolve()
 
 # ===== dane =====
-Q_DIR = "/scratch/tmp/21k_exps/new_flows_10s"
-A_DIR = "/scratch/tmp/21k_exps/mew_assignments_10s"
+Q_DIR = "/scratch/tmp/new_flows_10s"
+A_DIR = "/scratch/tmp/new_assignments_10s"
 DATA_ROOT = "/scratch/tmp"
-ADJDATA = str(PROJECT_DIR / "hex_adjacency_matrix.csv")
+ADJDATA = str(PROJECT_DIR / "new_hex_adjacency_matrix.csv")
 
 # ===== główny katalog pipeline =====
-PIPELINE_ROOT = Path("/scratch/tmp/pipeline_runs")
+PIPELINE_ROOT = Path("/scratch/tmp/ADTTP_tests_new")
 RUN_STAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
 RUN_NAME = f"run_{RUN_STAMP}"
 RUN_DIR = PIPELINE_ROOT / RUN_NAME
 
 # ===== podfoldery jednego runu =====
-TRAIN_DIR = RUN_DIR / "training"
+TRAIN_PREFIX = RUN_DIR / "training"
 INFER_DIR = RUN_DIR / "inference"
 VIS_DIR = RUN_DIR / "visual"
 
@@ -151,7 +151,7 @@ def save_pipeline_config(best_checkpoint: Path | None = None):
     config = {
         "run_name": RUN_NAME,
         "run_dir": str(RUN_DIR),
-        "training_dir": str(TRAIN_DIR),
+        "training_dir": str(TRAIN_PREFIX),
         "inference_dir": str(INFER_DIR),
         "visual_dir": str(VIS_DIR),
         "python_bin": PYTHON_BIN,
@@ -255,7 +255,7 @@ def build_train_command():
         "--weight_decay", str(WEIGHT_DECAY),
         "--epochs", str(EPOCHS),
         "--print_every", str(PRINT_EVERY),
-        "--save", str(TRAIN_DIR),
+        "--save", str(TRAIN_PREFIX),
         "--expid", str(EXPID),
         "--kernel_size", str(KERNEL_SIZE),
         "--blocks", str(BLOCKS),
@@ -357,7 +357,6 @@ def main():
 
     ensure_dir(PIPELINE_ROOT)
     ensure_dir(RUN_DIR)
-    ensure_dir(TRAIN_DIR)
     ensure_dir(INFER_DIR)
     ensure_dir(VIS_DIR)
 
@@ -370,7 +369,7 @@ def main():
 
     print_header("RUN DIRECTORY")
     print(f"RUN_DIR   = {RUN_DIR}")
-    print(f"TRAIN_DIR = {TRAIN_DIR}")
+    print(f"TRAIN_DIR = {TRAIN_PREFIX}")
     print(f"INFER_DIR = {INFER_DIR}")
     print(f"VIS_DIR   = {VIS_DIR}")
 
@@ -381,7 +380,7 @@ def main():
 
     # 2. najlepszy checkpoint
     print_header("ETAP 2: WYBÓR CHECKPOINTU")
-    best_checkpoint = find_best_checkpoint(TRAIN_DIR, expid=EXPID)
+    best_checkpoint = find_best_checkpoint(RUN_DIR, expid=EXPID)
     print(f"[INFO] Best checkpoint: {best_checkpoint}")
 
     copy_best_checkpoint_to_run_root(best_checkpoint)
@@ -399,7 +398,7 @@ def main():
 
     print_header("PIPELINE ZAKOŃCZONY")
     print(f"[OK] Cały run zapisany w: {RUN_DIR}")
-    print(f"[OK] Trening:             {TRAIN_DIR}")
+    print(f"[OK] Trening:             {TRAIN_PREFIX}")
     print(f"[OK] Inferencja:          {INFER_DIR}")
     print(f"[OK] Wizualizacje:        {VIS_DIR}")
     print(f"[OK] Best checkpoint:     {RUN_DIR / 'checkpoint_best.pth'}")
