@@ -13,10 +13,10 @@ PYTHON_BIN = "/home/drozd/miniconda/envs/wavenet_env/bin/python"
 PROJECT_DIR = Path("/home/drozd/OptimalAssignment").resolve()
 
 # ===== dane =====
-Q_DIR = "/scratch/tmp/new_flows_10s"
-A_DIR = "/scratch/tmp/new_assignments_10s"
+Q_DIR = "/scratch/tmp/elite_1k_exps/new_flows_10s"
+A_DIR = "/scratch/tmp/elite_1k_exps/new_assignments_10s"
 DATA_ROOT = "/scratch/tmp"
-ADJDATA = str(PROJECT_DIR / "new_hex_adjacency_matrix.csv")
+ADJDATA = "/scratch/tmp/21k_exps/21k_hex_adjacency_matrix.csv"
 
 # ===== główny katalog pipeline =====
 PIPELINE_ROOT = Path("/scratch/tmp/ADTTP_tests_new")
@@ -71,12 +71,12 @@ ATTENTION_NUM_HEADS = 4
 ATTENTION_FF_DIM = 64
 
 # ===== trening =====
-BATCH_SIZE = 32
+BATCH_SIZE = 128
 LEARNING_RATE = 0.001
 WEIGHT_DECAY = 0.0001
-EPOCHS = 1
-PRINT_EVERY = 1000
-NUM_WORKERS = 4
+EPOCHS = 100
+PRINT_EVERY = 8000
+NUM_WORKERS = 8
 EXPID = 1
 
 # ===== inferencja =====
@@ -492,7 +492,7 @@ def main():
     # 4. wizualizacja
     print_header("ETAP 4: WIZUALIZACJA")
     vis_cmd = build_visual_command()
-    run_command(vis_cmd, cwd=PROJECT_DIR, og_file=LOGS_DIR / "inference_visual.log")
+    run_command(vis_cmd, cwd=PROJECT_DIR, log_file=LOGS_DIR / "inference_visual.log")
 
     print_header("PIPELINE ZAKOŃCZONY")
     print(f"[OK] Cały run zapisany w: {RUN_DIR}")
