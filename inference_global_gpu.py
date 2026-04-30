@@ -699,6 +699,375 @@ def save_per_node_metrics(batch_dir: Path, agg: AggregateState):
 
     pd.DataFrame(group_rows).to_csv(batch_dir / "node_groups_aggregate.csv", index=False)
 
+def save_detailed_tt_descriptive_stats(batch_dir: Path, per_file_df: pd.DataFrame):
+    """
+    Zapisuje szczegółowe statystyki opisowe dla TT i błędów.
+    Działa na wierszach status == OK.
+    """
+
+    ok_df = per_file_df[per_file_df["status"] == "OK"].copy()
+
+    if ok_df.empty:
+        print("[WARN] Brak poprawnych plików do statystyk opisowych TT.")
+        return
+
+    # Dodatkowe kolumny pomocnicze
+    ok_df["tt_pred_over_real"] = np.where(
+        ok_df["tt_real"] != 0,
+        ok_df["tt_pred"] / ok_df["tt_real"],
+        np.nan,
+    )
+
+    ok_df["tt_signed_rel_diff"] = np.where(
+        ok_df["tt_real"] != 0,
+        ok_df["tt_signed_diff"] / ok_df["tt_real"],
+        np.nan,
+    )
+
+    ok_df["tt_abs_rel_diff_percent"] = 100.0 * ok_df["tt_rel_diff"]
+    ok_df["tt_signed_rel_diff_percent"] = 100.0 * ok_df["tt_signed_rel_diff"]
+
+    numeric_cols = [
+        "tt_real",
+        "tt_pred",
+        "tt_signed_diff",
+        "tt_abs_diff",
+        "tt_rel_diff",
+        "tt_abs_rel_diff_percent",
+        "tt_signed_rel_diff",
+        "tt_signed_rel_diff_percent",
+        "tt_pred_over_real",
+        "mae_eval",
+        "rmse_eval",
+    ]
+
+    numeric_cols = [c for c in numeric_cols if c in ok_df.columns]
+
+    rows = []
+
+    percentiles = [0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99]
+
+    for col in numeric_cols:
+        s = pd.to_numeric(ok_df[col], errors="coerce").dropna()
+
+        if s.empty:
+            continue
+
+        q = s.quantile(percentiles)
+
+        rows.append({
+            "metric": col,
+            "count": int(s.count()),
+            "mean": float(s.mean()),
+            "std": float(s.std(ddof=1)) if s.count() > 1 else np.nan,
+            "min": float(s.min()),
+            "p01": float(q.loc[0.01]),
+            "p05": float(q.loc[0.05]),
+            "p10": float(q.loc[0.10]),
+            "p25": float(q.loc[0.25]),
+            "median": float(q.loc[0.50]),
+            "p75": float(q.loc[0.75]),
+            "p90": float(q.loc[0.90]),
+            "p95": float(q.loc[0.95]),
+            "p99": float(q.loc[0.99]),
+            "max": float(s.max()),
+            "iqr": float(q.loc[0.75] - q.loc[0.25]),
+            "cv": float(s.std(ddof=1) / s.mean()) if s.count() > 1 and s.mean() != 0 else np.nan,
+            "skew": float(s.skew()) if s.count() > 2 else np.nan,
+            "kurtosis": float(s.kurtosis()) if s.count() > 3 else np.nan,
+        })
+
+    stats_df = pd.DataFrame(rows)
+    stats_df.to_csv(batch_dir / "tt_descriptive_stats.csv", index=False)
+
+    # Korelacje real TT vs pred TT
+    corr_pearson = ok_df[["tt_real", "tt_pred"]].corr(method="pearson").iloc[0, 1]
+    corr_spearman = ok_df[["tt_real", "tt_pred"]].corr(method="spearman").iloc[0, 1]
+
+    # Bias i częstość niedoszacowania
+    n = len(ok_df)
+
+    under_mask = ok_df["tt_signed_diff"] < 0
+    over_mask = ok_df["tt_signed_diff"] > 0
+
+    summary = {
+        "n_files": int(n),
+
+        "tt_real_mean": float(ok_df["tt_real"].mean()),
+        "tt_pred_mean": float(ok_df["tt_pred"].mean()),
+
+        "tt_real_median": float(ok_df["tt_real"].median()),
+        "tt_pred_median": float(ok_df["tt_pred"].median()),
+
+        "tt_signed_error_mean": float(ok_df["tt_signed_diff"].mean()),
+        "tt_signed_error_median": float(ok_df["tt_signed_diff"].median()),
+
+        "tt_abs_error_mean": float(ok_df["tt_abs_diff"].mean()),
+        "tt_abs_error_median": float(ok_df["tt_abs_diff"].median()),
+
+        "tt_relative_error_mean": float(ok_df["tt_rel_diff"].mean()),
+        "tt_relative_error_median": float(ok_df["tt_rel_diff"].median()),
+
+        "tt_relative_error_percent_mean": float(100.0 * ok_df["tt_rel_diff"].mean()),
+        "tt_relative_error_percent_median": float(100.0 * ok_df["tt_rel_diff"].median()),
+
+        "tt_signed_relative_error_mean": float(ok_df["tt_signed_rel_diff"].mean()),
+        "tt_signed_relative_error_median": float(ok_df["tt_signed_rel_diff"].median()),
+
+        "tt_signed_relative_error_percent_mean": float(100.0 * ok_df["tt_signed_rel_diff"].mean()),
+        "tt_signed_relative_error_percent_median": float(100.0 * ok_df["tt_signed_rel_diff"].median()),
+
+        "tt_pred_over_real_mean": float(ok_df["tt_pred_over_real"].mean()),
+        "tt_pred_over_real_median": float(ok_df["tt_pred_over_real"].median()),
+
+        "pearson_corr_real_pred_tt": float(corr_pearson),
+        "spearman_corr_real_pred_tt": float(corr_spearman),
+
+        "underprediction_count": int(under_mask.sum()),
+        "overprediction_count": int(over_mask.sum()),
+        "exact_count": int((ok_df["tt_signed_diff"] == 0).sum()),
+
+        "underprediction_fraction": float(under_mask.mean()),
+        "overprediction_fraction": float(over_mask.mean()),
+    }
+
+    with open(batch_dir / "tt_descriptive_summary.json", "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False)
+
+    pd.DataFrame([summary]).to_csv(batch_dir / "tt_descriptive_summary.csv", index=False)
+
+    # Statystyki po koszykach real TT — przydatne, żeby zobaczyć czy błąd zależy od wielkości symulacji
+    try:
+        ok_df["tt_real_bin"] = pd.qcut(
+            ok_df["tt_real"],
+            q=10,
+            duplicates="drop",
+        )
+
+        bin_df = (
+            ok_df
+            .groupby("tt_real_bin", observed=True)
+            .agg(
+                n_files=("file_name", "count"),
+                tt_real_mean=("tt_real", "mean"),
+                tt_pred_mean=("tt_pred", "mean"),
+                tt_signed_diff_mean=("tt_signed_diff", "mean"),
+                tt_abs_diff_mean=("tt_abs_diff", "mean"),
+                tt_rel_diff_mean=("tt_rel_diff", "mean"),
+                tt_rel_diff_median=("tt_rel_diff", "median"),
+                mae_eval_mean=("mae_eval", "mean"),
+                rmse_eval_mean=("rmse_eval", "mean"),
+            )
+            .reset_index()
+        )
+
+        bin_df["tt_real_bin"] = bin_df["tt_real_bin"].astype(str)
+        bin_df.to_csv(batch_dir / "tt_error_by_real_tt_quantile.csv", index=False)
+
+    except Exception as e:
+        print(f"[WARN] Nie udało się policzyć tt_error_by_real_tt_quantile.csv: {repr(e)}")
+
+    print("\n=== TT descriptive summary ===")
+    print(json.dumps(summary, indent=2, ensure_ascii=False))
+
+
+def plot_real_vs_pred_tt_yzoom(batch_dir: Path, per_file_df: pd.DataFrame):
+    """
+    Drugi scatterplot: ta sama relacja real TT vs pred TT,
+    ale oś Y jest skalowana do zakresu predicted TT,
+    a nie do wspólnej skali z linią y=x.
+
+    Dzięki temu widać zmienność predykcji.
+    """
+
+    ok_df = per_file_df[per_file_df["status"] == "OK"].copy()
+
+    if ok_df.empty:
+        return
+
+    x = ok_df["tt_real"].to_numpy(dtype=float)
+    y = ok_df["tt_pred"].to_numpy(dtype=float)
+
+    finite = np.isfinite(x) & np.isfinite(y)
+    x = x[finite]
+    y = y[finite]
+
+    if len(x) == 0:
+        return
+
+    x_min = float(np.min(x))
+    x_max = float(np.max(x))
+    y_min = float(np.min(y))
+    y_max = float(np.max(y))
+
+    x_pad = 0.03 * (x_max - x_min) if x_max > x_min else 1.0
+    y_pad = 0.15 * (y_max - y_min) if y_max > y_min else 1.0
+
+    x_lo = x_min - x_pad
+    x_hi = x_max + x_pad
+    y_lo = y_min - y_pad
+    y_hi = y_max + y_pad
+
+    # Prosta regresja liniowa pred ~ real
+    if len(x) >= 2:
+        slope, intercept = np.polyfit(x, y, deg=1)
+        x_line = np.linspace(x_lo, x_hi, 200)
+        y_line = slope * x_line + intercept
+    else:
+        slope, intercept = np.nan, np.nan
+        x_line = np.array([])
+        y_line = np.array([])
+
+    plt.figure(figsize=(9, 6))
+
+    plt.scatter(x, y, alpha=0.75, label="pliki")
+
+    # Linia trendu
+    if len(x_line) > 0:
+        plt.plot(
+            x_line,
+            y_line,
+            linewidth=1.5,
+            label=f"trend: pred = {slope:.3f} * real + {intercept:.2g}",
+        )
+
+    # Linia idealna też zostaje, ale nie wymusza skali osi
+    ideal_y = np.array([x_lo, x_hi])
+    plt.plot(
+        [x_lo, x_hi],
+        ideal_y,
+        linestyle="--",
+        linewidth=1,
+        label="idealnie: pred = real",
+    )
+
+    plt.axhline(
+        np.mean(y),
+        linestyle=":",
+        linewidth=1,
+        label=f"mean pred TT = {np.mean(y):.3g}",
+    )
+
+    plt.title("Real TT vs predicted TT — zoom osi Y")
+    plt.xlabel("Ground truth TT")
+    plt.ylabel("Predicted TT")
+
+    plt.xlim(x_lo, x_hi)
+    plt.ylim(y_lo, y_hi)
+
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(batch_dir / "real_tt_vs_predicted_tt_yzoom.png", dpi=240)
+    plt.close()
+
+
+def plot_tt_signed_error_vs_real_tt(batch_dir: Path, per_file_df: pd.DataFrame):
+    """
+    Bardzo pomocny wykres diagnostyczny:
+    pokazuje, czy model zaniża/zawyża TT zależnie od wielkości real TT.
+    """
+
+    ok_df = per_file_df[per_file_df["status"] == "OK"].copy()
+
+    if ok_df.empty:
+        return
+
+    x = ok_df["tt_real"].to_numpy(dtype=float)
+    y = ok_df["tt_signed_diff"].to_numpy(dtype=float)
+
+    finite = np.isfinite(x) & np.isfinite(y)
+    x = x[finite]
+    y = y[finite]
+
+    if len(x) == 0:
+        return
+
+    x_min = float(np.min(x))
+    x_max = float(np.max(x))
+    y_min = float(np.min(y))
+    y_max = float(np.max(y))
+
+    x_pad = 0.03 * (x_max - x_min) if x_max > x_min else 1.0
+    y_pad = 0.15 * (y_max - y_min) if y_max > y_min else 1.0
+
+    if len(x) >= 2:
+        slope, intercept = np.polyfit(x, y, deg=1)
+        x_line = np.linspace(x_min - x_pad, x_max + x_pad, 200)
+        y_line = slope * x_line + intercept
+    else:
+        slope, intercept = np.nan, np.nan
+        x_line = np.array([])
+        y_line = np.array([])
+
+    plt.figure(figsize=(9, 6))
+    plt.scatter(x, y, alpha=0.75, label="pliki")
+    plt.axhline(0.0, linestyle="--", linewidth=1, label="brak biasu")
+
+    if len(x_line) > 0:
+        plt.plot(
+            x_line,
+            y_line,
+            linewidth=1.5,
+            label=f"trend błędu: err = {slope:.3f} * real + {intercept:.2g}",
+        )
+
+    plt.title("Signed TT error vs real TT")
+    plt.xlabel("Ground truth TT")
+    plt.ylabel("Predicted TT - Ground truth TT")
+    plt.xlim(x_min - x_pad, x_max + x_pad)
+    plt.ylim(y_min - y_pad, y_max + y_pad)
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(batch_dir / "tt_signed_error_vs_real_tt.png", dpi=240)
+    plt.close()
+
+
+def plot_tt_relative_error_vs_real_tt(batch_dir: Path, per_file_df: pd.DataFrame):
+    """
+    Wykres błędu względnego TT [%] względem real TT.
+    """
+
+    ok_df = per_file_df[per_file_df["status"] == "OK"].copy()
+
+    if ok_df.empty:
+        return
+
+    x = ok_df["tt_real"].to_numpy(dtype=float)
+    y = 100.0 * ok_df["tt_rel_diff"].to_numpy(dtype=float)
+
+    finite = np.isfinite(x) & np.isfinite(y)
+    x = x[finite]
+    y = y[finite]
+
+    if len(x) == 0:
+        return
+
+    x_min = float(np.min(x))
+    x_max = float(np.max(x))
+    y_min = float(np.min(y))
+    y_max = float(np.max(y))
+
+    x_pad = 0.03 * (x_max - x_min) if x_max > x_min else 1.0
+    y_pad = 0.15 * (y_max - y_min) if y_max > y_min else 1.0
+
+    plt.figure(figsize=(9, 6))
+    plt.scatter(x, y, alpha=0.75)
+    plt.axhline(np.mean(y), linestyle=":", linewidth=1, label=f"mean = {np.mean(y):.2f}%")
+    plt.axhline(np.median(y), linestyle="--", linewidth=1, label=f"median = {np.median(y):.2f}%")
+
+    plt.title("Relative TT error vs real TT")
+    plt.xlabel("Ground truth TT")
+    plt.ylabel("|Predicted TT - Ground truth TT| / Ground truth TT [%]")
+    plt.xlim(x_min - x_pad, x_max + x_pad)
+    plt.ylim(y_min - y_pad, y_max + y_pad)
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(batch_dir / "tt_relative_error_vs_real_tt.png", dpi=240)
+    plt.close()
+
 
 def plot_real_vs_pred_tt(batch_dir: Path, per_file_df: pd.DataFrame, summary: dict):
     ok_df = per_file_df[per_file_df["status"] == "OK"].copy()
@@ -1201,7 +1570,17 @@ def main():
 
     save_tt_timeseries(batch_dir, agg)
     save_per_node_metrics(batch_dir, agg)
+
+    # Oryginalny wykres z osią 1:1
     plot_real_vs_pred_tt(batch_dir, per_file_df, summary)
+
+    # Nowe wykresy diagnostyczne
+    plot_real_vs_pred_tt_yzoom(batch_dir, per_file_df)
+    plot_tt_signed_error_vs_real_tt(batch_dir, per_file_df)
+    plot_tt_relative_error_vs_real_tt(batch_dir, per_file_df)
+
+    # Szczegółowe statystyki opisowe
+    save_detailed_tt_descriptive_stats(batch_dir, per_file_df)
 
     print("\n=== PODSUMOWANIE ZBIORCZE ===", flush=True)
     print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)
