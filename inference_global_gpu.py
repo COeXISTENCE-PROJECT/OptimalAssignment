@@ -920,7 +920,7 @@ def plot_real_vs_pred_tt_yzoom(batch_dir: Path, per_file_df: pd.DataFrame):
 
     plt.figure(figsize=(9, 6))
 
-    plt.scatter(x, y, alpha=0.75, label="pliki")
+    plt.scatter(x, y, alpha=0.55, label="assignments")
 
     # Linia trendu
     if len(x_line) > 0:
@@ -938,7 +938,7 @@ def plot_real_vs_pred_tt_yzoom(batch_dir: Path, per_file_df: pd.DataFrame):
         ideal_y,
         linestyle="--",
         linewidth=1,
-        label="idealnie: pred = real",
+        label="real = predicted",
     )
 
     plt.axhline(
@@ -1093,14 +1093,13 @@ def plot_real_vs_pred_tt(batch_dir: Path, per_file_df: pd.DataFrame, summary: di
     hi = max_v + pad
 
     plt.figure(figsize=(7, 7))
-    plt.scatter(x, y, alpha=0.75)
-    plt.plot([lo, hi], [lo, hi], linestyle="--", linewidth=1, label="idealnie: pred = real")
+    plt.scatter(x, y, alpha=0.55)
+    plt.plot([lo, hi], [lo, hi], linestyle="--", linewidth=1, label="real = pred")
 
     total_rel = summary.get("tt_rel_diff_total", np.nan)
 
     if np.isfinite(total_rel):
         text = (
-            f"Suma zbioru:\n"
             f"real TT = {summary.get('tt_real_total', np.nan):.3g}\n"
             f"pred TT = {summary.get('tt_pred_total', np.nan):.3g}\n"
             f"rel diff = {total_rel:.2%}"
@@ -1118,7 +1117,7 @@ def plot_real_vs_pred_tt(batch_dir: Path, per_file_df: pd.DataFrame, summary: di
         bbox={"boxstyle": "round", "alpha": 0.15},
     )
 
-    plt.title("Real TT vs predicted TT — każdy punkt = jeden plik")
+    plt.title("Real TT vs predicted TT")
     plt.xlabel("Ground truth TT")
     plt.ylabel("Predicted TT")
     plt.xlim(lo, hi)
