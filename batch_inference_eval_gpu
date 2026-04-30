@@ -1,0 +1,141 @@
+#!/bin/bash
+#SBATCH --job-name=adttp_gpu_batch
+#SBATCH --partition=rknodes
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
+#SBATCH --output=slurm-gpu-batch-%j.out
+#SBATCH --error=slurm-gpu-batch-%j.err
+
+set -euo pipefail
+
+cd /home/drozd/OptimalAssignment
+
+export PYTHONUNBUFFERED=1
+
+python_bin=/home/drozd/miniconda/envs/wavenet_env/bin/python
+
+echo "Job ID: $SLURM_JOB_ID"
+echo "Node:   $SLURMD_NODENAME"
+echo "Start:  $(date)"
+
+echo "GPU status before run:"
+nvidia-smi || true
+
+# ============================================================
+# Dane
+# ============================================================
+
+q_dir=/scratch/tmp/21k_exps/new_flows_10s
+a_dir=/scratch/tmp/21k_exps/new_assignments_10s
+adjdata=/home/drozd/OptimalAssignment/hex_adjacency_matrix.csv
+
+# ============================================================
+# Checkpoint
+# ============================================================
+
+checkpoint=/scratch/tmp/ADTTP_tests_new/run_20260423_102943/training_exp1_best_2.3342.pth
+
+# ============================================================
+# Output
+# ============================================================
+
+out_root=/scratch/tmp/infer_runs/att_lstm_21k_infer_statistics_gpu_batch
+mkdir -p "$out_root"
+
+batch_name=batch_gpu_${SLURM_JOB_ID}_$(date +%Y%m%d_%H%M%S)
+
+# ============================================================
+# Split — musi odpowiadać treningowi
+# ============================================================
+
+seed=42
+train_ratio=0.7
+val_ratio=0.1
+
+# ============================================================
+# Wybór liczby symulacji
+# ============================================================
+
+num_files=1000
+start_index=0
+
+# Ile symulacji liczyć równolegle na GPU.
+# Zacznij od 16. Jeśli VRAM pozwala, spróbuj 32 albo 64.
+batch_size_files=16
+
+# ============================================================
+# Model hyperparams — muszą odpowiadać checkpointowi
+# ============================================================
+
+device=cuda:0
+num_nodes=195
+
+seq_length_q=15
+seq_length_a=30
+
+sequence_model=lstm
+fuse_method=Attention
+
+nhid=64
+dropout=0.3
+learning_rate=0.001
+weight_decay=0.0001
+
+kernel_size=2
+blocks=4
+layers=2
+
+a_embedding_size=64
+a_hidden_size=64
+q_rep_dim=64
+fused_dim=64
+mlp_hidden_dim=128
+attention_num_heads=4
+attention_ff_dim=64
+
+# ============================================================
+# Uruchomienie
+# ============================================================
+
+"$python_bin" batch_inference_eval_gpu.py \
+  --q_dir "$q_dir" \
+  --a_dir "$a_dir" \
+  --adjdata "$adjdata" \
+  --checkpoint "$checkpoint" \
+  --output_root "$out_root" \
+  --batch_name "$batch_name" \
+  --seed "$seed" \
+  --train_ratio "$train_ratio" \
+  --val_ratio "$val_ratio" \
+  --num_files "$num_files" \
+  --start_index "$start_index" \
+  --seq_length_q "$seq_length_q" \
+  --seq_length_a "$seq_length_a" \
+  --device "$device" \
+  --num_nodes "$num_nodes" \
+  --nhid "$nhid" \
+  --dropout "$dropout" \
+  --learning_rate "$learning_rate" \
+  --weight_decay "$weight_decay" \
+  --kernel_size "$kernel_size" \
+  --blocks "$blocks" \
+  --layers "$layers" \
+  --sequence_model "$sequence_model" \
+  --fuse_method "$fuse_method" \
+  --a_embedding_size "$a_embedding_size" \
+  --a_hidden_size "$a_hidden_size" \
+  --q_rep_dim "$q_rep_dim" \
+  --fused_dim "$fused_dim" \
+  --mlp_hidden_dim "$mlp_hidden_dim" \
+  --attention_num_heads "$attention_num_heads" \
+  --attention_ff_dim "$attention_ff_dim" \
+  --batch_size_files "$batch_size_files" \
+  --delta_t 10.0 \
+  --gcn_bool \
+  --continue_on_error
+
+echo "GPU status after run:"
+nvidia-smi || true
+
+echo "End: $(date)"
