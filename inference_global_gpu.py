@@ -1230,6 +1230,17 @@ def process_items_batch(
             delta_t=args.delta_t,
         )
 
+        add_two_band_debug_columns(
+            row=row,
+            pred_TN=pred_TN,
+            real_TN=real_TN,
+            assign_TN=item.assign_TN,
+            seed_steps=seed_steps,
+            current_nodes=item.current_nodes,
+            nodes_to_copy=item.nodes_to_copy,
+            delta_t=args.delta_t,
+        )
+
         rows.append(row)
         agg.update_ok(row, details)
 
@@ -1420,6 +1431,686 @@ def build_parser():
 
     return p
 
+# ============================================================
+# Diagnostyka collapse / dwóch poziomów TT_pred
+# ============================================================
+
+def _add_flat_stats(row: dict, prefix: str, arr: np.ndarray, eps: float = 1e-9):
+    """
+    Dodaje do row statystyki rozkładu tablicy.
+    Używane dla pred_eval, real_eval, assign_eval, sum po czasie itd.
+    """
+    a = np.asarray(arr, dtype=np.float64).ravel()
+    row[f"{prefix}_n"] = int(a.size)
+
+    if a.size == 0:
+        for key in [
+            "finite_n", "sum", "abs_sum", "mean", "std", "min", "p01",
+            "p05", "p25", "median", "p75", "p95", "p99", "max",
+            "range", "iqr", "cv_abs_mean", "nonzero_count",
+            "positive_count", "negative_count", "zero_fraction",
+        ]:
+            row[f"{prefix}_{key}"] = np.nan
+        return
+
+    finite = np.isfinite(a)
+    v = a[finite]
+    row[f"{prefix}_finite_n"] = int(v.size)
+
+    if v.size == 0:
+        return
+
+    q01, q05, q25, q50, q75, q95, q99 = np.quantile(
+        v, [0.01, 0.05, 0.25, 0.50, 0.75, 0.95, 0.99]
+    )
+
+    mean = float(np.mean(v))
+    std = float(np.std(v, ddof=1)) if v.size > 1 else 0.0
+
+    row[f"{prefix}_sum"] = float(np.sum(v))
+    row[f"{prefix}_abs_sum"] = float(np.sum(np.abs(v)))
+    row[f"{prefix}_mean"] = mean
+    row[f"{prefix}_std"] = std
+    row[f"{prefix}_min"] = float(np.min(v))
+    row[f"{prefix}_p01"] = float(q01)
+    row[f"{prefix}_p05"] = float(q05)
+    row[f"{prefix}_p25"] = float(q25)
+    row[f"{prefix}_median"] = float(q50)
+    row[f"{prefix}_p75"] = float(q75)
+    row[f"{prefix}_p95"] = float(q95)
+    row[f"{prefix}_p99"] = float(q99)
+    row[f"{prefix}_max"] = float(np.max(v))
+    row[f"{prefix}_range"] = float(np.max(v) - np.min(v))
+    row[f"{prefix}_iqr"] = float(q75 - q25)
+    row[f"{prefix}_cv_abs_mean"] = float(std / abs(mean)) if abs(mean) > eps else np.nan
+
+    row[f"{prefix}_nonzero_count"] = int(np.count_nonzero(np.abs(v) > eps))
+    row[f"{prefix}_positive_count"] = int(np.count_nonzero(v > eps))
+    row[f"{prefix}_negative_count"] = int(np.count_nonzero(v < -eps))
+    row[f"{prefix}_zero_fraction"] = float(np.mean(np.abs(v) <= eps))
+
+
+def add_two_band_debug_columns(
+    row: dict,
+    pred_TN: np.ndarray,
+    real_TN: np.ndarray,
+    assign_TN: np.ndarray,
+    seed_steps: int,
+    current_nodes: int,
+    nodes_to_copy: int,
+    delta_t: float,
+):
+    """
+    Rozszerza pojedynczy row o statystyki, które pozwalają ustalić,
+    skąd biorą się dwa poziomy TT_pred.
+
+    Kluczowe pytania:
+      1. Czy pred_eval ma prawie stałą średnią?
+      2. Czy TT_pred = średnia_pred * liczba_elementów * delta_t?
+      3. Czy poziomy korelują z T / liczbą wartości / assignment maską?
+      4. Czy assignmenty mają dwie rodziny?
+    """
+
+    pred_eval = np.asarray(pred_TN[seed_steps:, :nodes_to_copy], dtype=np.float64)
+    real_eval = np.asarray(real_TN[seed_steps:, :nodes_to_copy], dtype=np.float64)
+    assign_eval = np.asarray(assign_TN[seed_steps:, :nodes_to_copy], dtype=np.float64)
+
+    err_eval = pred_eval - real_eval
+
+    row["current_nodes"] = int(current_nodes)
+    row["nodes_to_copy"] = int(nodes_to_copy)
+    row["eval_values"] = int(pred_eval.size)
+
+    # Rekonstrukcja TT z mean * liczba elementów.
+    # Jeśli dwa poziomy wynikają głównie z pred_eval_mean, to tutaj będzie to widać.
+    if pred_eval.size > 0:
+        row["tt_pred_from_pred_mean_check"] = float(delta_t * np.mean(pred_eval) * pred_eval.size)
+        row["tt_real_from_real_mean_check"] = float(delta_t * np.mean(real_eval) * real_eval.size)
+
+        row["tt_pred_per_eval_value"] = float(row["tt_pred"] / (delta_t * pred_eval.size))
+        row["tt_real_per_eval_value"] = float(row["tt_real"] / (delta_t * real_eval.size))
+
+        row["tt_pred_minus_mean_reconstruction"] = float(
+            row["tt_pred"] - row["tt_pred_from_pred_mean_check"]
+        )
+        row["tt_real_minus_mean_reconstruction"] = float(
+            row["tt_real"] - row["tt_real_from_real_mean_check"]
+        )
+    else:
+        row["tt_pred_from_pred_mean_check"] = np.nan
+        row["tt_real_from_real_mean_check"] = np.nan
+        row["tt_pred_per_eval_value"] = np.nan
+        row["tt_real_per_eval_value"] = np.nan
+        row["tt_pred_minus_mean_reconstruction"] = np.nan
+        row["tt_real_minus_mean_reconstruction"] = np.nan
+
+    # Statystyki wartości q.
+    _add_flat_stats(row, "pred_eval", pred_eval)
+    _add_flat_stats(row, "real_eval", real_eval)
+    _add_flat_stats(row, "err_eval", err_eval)
+
+    # Statystyki assignmentów.
+    _add_flat_stats(row, "assign_eval", assign_eval)
+
+    # Ile różnych wartości assignmentu — przydatne, jeśli jest one-hot / binarne / thresholdowane.
+    if assign_eval.size > 0:
+        row["assign_eval_unique_count_rounded_6"] = int(
+            len(np.unique(np.round(assign_eval.ravel(), 6)))
+        )
+    else:
+        row["assign_eval_unique_count_rounded_6"] = 0
+
+    # Sumy po czasie: jeśli poziomy TT_pred wynikają ze stałego profilu per timestep,
+    # będzie to widoczne w pred_per_t_sum_mean/std.
+    pred_per_t_sum = np.sum(pred_eval, axis=1)
+    real_per_t_sum = np.sum(real_eval, axis=1)
+    assign_per_t_sum = np.sum(assign_eval, axis=1)
+
+    pred_per_t_abs_sum = np.sum(np.abs(pred_eval), axis=1)
+    real_per_t_abs_sum = np.sum(np.abs(real_eval), axis=1)
+    assign_per_t_abs_sum = np.sum(np.abs(assign_eval), axis=1)
+
+    _add_flat_stats(row, "pred_per_t_sum", pred_per_t_sum)
+    _add_flat_stats(row, "real_per_t_sum", real_per_t_sum)
+    _add_flat_stats(row, "assign_per_t_sum", assign_per_t_sum)
+
+    _add_flat_stats(row, "pred_per_t_abs_sum", pred_per_t_abs_sum)
+    _add_flat_stats(row, "real_per_t_abs_sum", real_per_t_abs_sum)
+    _add_flat_stats(row, "assign_per_t_abs_sum", assign_per_t_abs_sum)
+
+    # Sumy po node'ach: jeśli tylko wybrane node'y generują poziomy,
+    # będzie to widoczne w pred_per_node_sum/std/range.
+    pred_per_node_sum = np.sum(pred_eval, axis=0)
+    real_per_node_sum = np.sum(real_eval, axis=0)
+    assign_per_node_sum = np.sum(assign_eval, axis=0)
+
+    _add_flat_stats(row, "pred_per_node_sum", pred_per_node_sum)
+    _add_flat_stats(row, "real_per_node_sum", real_per_node_sum)
+    _add_flat_stats(row, "assign_per_node_sum", assign_per_node_sum)
+
+    # Bardzo bezpośrednia miara "collapse":
+    # ile zmienności ma predykcja względem reala.
+    pred_std = row.get("pred_eval_std", np.nan)
+    real_std = row.get("real_eval_std", np.nan)
+
+    row["pred_real_std_ratio_eval"] = (
+        float(pred_std / real_std)
+        if np.isfinite(pred_std) and np.isfinite(real_std) and real_std != 0
+        else np.nan
+    )
+
+    pred_range = row.get("pred_eval_range", np.nan)
+    real_range = row.get("real_eval_range", np.nan)
+
+    row["pred_real_range_ratio_eval"] = (
+        float(pred_range / real_range)
+        if np.isfinite(pred_range) and np.isfinite(real_range) and real_range != 0
+        else np.nan
+    )
+
+
+def _kmeans_1d_two_clusters(values: np.ndarray, max_iter: int = 100):
+    """
+    Prosty 1D k-means bez sklearn.
+    Zwraca:
+      labels: 0 dla low, 1 dla high, -1 dla NaN
+      centers_sorted: [center_low, center_high]
+      threshold: środek między centrami
+    """
+    values = np.asarray(values, dtype=np.float64)
+    finite = np.isfinite(values)
+    v = values[finite]
+
+    labels_full = np.full(values.shape, -1, dtype=int)
+
+    if v.size < 2 or np.unique(v).size < 2:
+        center = float(np.nanmean(v)) if v.size else np.nan
+        return labels_full, np.array([center, center], dtype=np.float64), np.nan
+
+    centers = np.array(
+        [np.quantile(v, 0.25), np.quantile(v, 0.75)],
+        dtype=np.float64,
+    )
+
+    if centers[0] == centers[1]:
+        centers = np.array([np.min(v), np.max(v)], dtype=np.float64)
+
+    labels = np.zeros(v.shape, dtype=int)
+
+    for _ in range(max_iter):
+        dist = np.abs(v[:, None] - centers[None, :])
+        new_labels = np.argmin(dist, axis=1)
+
+        new_centers = centers.copy()
+        for k in [0, 1]:
+            if np.any(new_labels == k):
+                new_centers[k] = np.mean(v[new_labels == k])
+
+        if np.allclose(new_centers, centers, rtol=1e-10, atol=1e-10):
+            labels = new_labels
+            centers = new_centers
+            break
+
+        labels = new_labels
+        centers = new_centers
+
+    order = np.argsort(centers)
+    low_cluster = order[0]
+    high_cluster = order[1]
+
+    labels_low_high = np.where(labels == low_cluster, 0, 1)
+    labels_full[finite] = labels_low_high
+
+    centers_sorted = centers[order]
+    threshold = float(np.mean(centers_sorted))
+
+    return labels_full, centers_sorted, threshold
+
+
+def _linear_fit_summary(name: str, df: pd.DataFrame) -> dict:
+    d = df[["tt_real", "tt_pred"]].replace([np.inf, -np.inf], np.nan).dropna()
+
+    out = {
+        "group": name,
+        "n": int(len(d)),
+        "slope_pred_vs_real": np.nan,
+        "intercept_pred_vs_real": np.nan,
+        "pearson_real_pred": np.nan,
+        "spearman_real_pred": np.nan,
+    }
+
+    if len(d) >= 2 and d["tt_real"].nunique() > 1:
+        slope, intercept = np.polyfit(
+            d["tt_real"].to_numpy(dtype=float),
+            d["tt_pred"].to_numpy(dtype=float),
+            deg=1,
+        )
+
+        out["slope_pred_vs_real"] = float(slope)
+        out["intercept_pred_vs_real"] = float(intercept)
+        out["pearson_real_pred"] = float(d["tt_real"].corr(d["tt_pred"], method="pearson"))
+        out["spearman_real_pred"] = float(d["tt_real"].corr(d["tt_pred"], method="spearman"))
+
+    return out
+
+
+def save_two_band_collapse_diagnostics(batch_dir: Path, per_file_df: pd.DataFrame):
+    """
+    Główna diagnostyka dwóch poziomów TT_pred.
+
+    Tworzy katalog:
+        two_band_diagnostics/
+
+    Najważniejsze pliki:
+        per_file_metrics_with_pred_bands.csv
+        tt_pred_band_summary.csv
+        feature_separation_low_vs_high.csv
+        correlations_with_tt_pred.csv
+        tt_pred_sorted_with_gaps.csv
+        collapse_summary.json
+        tt_pred_histogram_two_bands.png
+        real_vs_pred_tt_colored_by_band.png
+        tt_pred_vs_T_colored_by_band.png
+    """
+
+    diag_dir = batch_dir / "two_band_diagnostics"
+    diag_dir.mkdir(parents=True, exist_ok=True)
+
+    ok_df = per_file_df[per_file_df["status"] == "OK"].copy()
+
+    if ok_df.empty:
+        print("[WARN] Brak OK rows dla two_band_collapse_diagnostics.")
+        return
+
+    if "tt_pred" not in ok_df.columns or "tt_real" not in ok_df.columns:
+        print("[WARN] Brak kolumn tt_pred/tt_real.")
+        return
+
+    y = ok_df["tt_pred"].to_numpy(dtype=np.float64)
+    x = ok_df["tt_real"].to_numpy(dtype=np.float64)
+
+    finite = np.isfinite(x) & np.isfinite(y)
+    ok_df = ok_df.loc[finite].copy()
+
+    if ok_df.empty:
+        print("[WARN] Brak skończonych wartości tt_real/tt_pred.")
+        return
+
+    y = ok_df["tt_pred"].to_numpy(dtype=np.float64)
+    x = ok_df["tt_real"].to_numpy(dtype=np.float64)
+
+    labels, centers, threshold = _kmeans_1d_two_clusters(y)
+
+    ok_df["tt_pred_band_id"] = labels
+    ok_df["tt_pred_band"] = np.where(ok_df["tt_pred_band_id"] == 0, "low", "high")
+    ok_df.loc[ok_df["tt_pred_band_id"] < 0, "tt_pred_band"] = "nan"
+
+    ok_df["tt_pred_band_threshold"] = threshold
+    ok_df["tt_pred_distance_to_band_center"] = np.where(
+        ok_df["tt_pred_band_id"] == 0,
+        np.abs(ok_df["tt_pred"] - centers[0]),
+        np.abs(ok_df["tt_pred"] - centers[1]),
+    )
+
+    ok_df.to_csv(diag_dir / "per_file_metrics_with_pred_bands.csv", index=False)
+
+    # --------------------------------------------------------
+    # Posortowane TT_pred i największe przerwy
+    # --------------------------------------------------------
+    sorted_df = ok_df.sort_values("tt_pred").reset_index(drop=True).copy()
+    sorted_df["rank_by_tt_pred"] = np.arange(len(sorted_df))
+
+    if len(sorted_df) >= 2:
+        gaps = np.diff(sorted_df["tt_pred"].to_numpy(dtype=float))
+        sorted_df["gap_to_next_tt_pred"] = np.r_[gaps, np.nan]
+    else:
+        sorted_df["gap_to_next_tt_pred"] = np.nan
+
+    sorted_df.to_csv(diag_dir / "tt_pred_sorted_with_gaps.csv", index=False)
+
+    largest_gaps = (
+        sorted_df
+        .dropna(subset=["gap_to_next_tt_pred"])
+        .sort_values("gap_to_next_tt_pred", ascending=False)
+        .head(20)
+        .copy()
+    )
+
+    largest_gaps.to_csv(diag_dir / "tt_pred_largest_gaps_top20.csv", index=False)
+
+    # --------------------------------------------------------
+    # Podsumowanie pasm
+    # --------------------------------------------------------
+    agg_spec = {
+        "n_files": ("file_name", "count"),
+
+        "tt_pred_mean": ("tt_pred", "mean"),
+        "tt_pred_std": ("tt_pred", "std"),
+        "tt_pred_min": ("tt_pred", "min"),
+        "tt_pred_median": ("tt_pred", "median"),
+        "tt_pred_max": ("tt_pred", "max"),
+
+        "tt_real_mean": ("tt_real", "mean"),
+        "tt_real_std": ("tt_real", "std"),
+        "tt_real_min": ("tt_real", "min"),
+        "tt_real_median": ("tt_real", "median"),
+        "tt_real_max": ("tt_real", "max"),
+
+        "tt_rel_diff_mean": ("tt_rel_diff", "mean"),
+        "tt_rel_diff_median": ("tt_rel_diff", "median"),
+
+        "mae_eval_mean": ("mae_eval", "mean"),
+        "mae_eval_median": ("mae_eval", "median"),
+        "rmse_eval_mean": ("rmse_eval", "mean"),
+    }
+
+    extra_cols = [
+        "timesteps_total",
+        "timesteps_eval",
+        "nodes",
+        "current_nodes",
+        "nodes_to_copy",
+        "eval_values",
+
+        "tt_pred_per_eval_value",
+        "tt_real_per_eval_value",
+
+        "pred_eval_mean",
+        "pred_eval_std",
+        "pred_eval_range",
+        "pred_eval_cv_abs_mean",
+
+        "real_eval_mean",
+        "real_eval_std",
+        "real_eval_range",
+        "real_eval_cv_abs_mean",
+
+        "pred_real_std_ratio_eval",
+        "pred_real_range_ratio_eval",
+
+        "assign_eval_sum",
+        "assign_eval_abs_sum",
+        "assign_eval_mean",
+        "assign_eval_std",
+        "assign_eval_nonzero_count",
+        "assign_eval_unique_count_rounded_6",
+
+        "assign_per_t_sum_mean",
+        "assign_per_t_sum_std",
+        "assign_per_t_sum_min",
+        "assign_per_t_sum_max",
+
+        "pred_per_t_sum_mean",
+        "pred_per_t_sum_std",
+        "pred_per_t_sum_min",
+        "pred_per_t_sum_max",
+
+        "real_per_t_sum_mean",
+        "real_per_t_sum_std",
+        "real_per_t_sum_min",
+        "real_per_t_sum_max",
+    ]
+
+    for c in extra_cols:
+        if c in ok_df.columns:
+            for func in ["mean", "std", "min", "median", "max"]:
+                agg_spec[f"{c}_{func}"] = (c, func)
+
+    band_summary = (
+        ok_df
+        .groupby("tt_pred_band", observed=True)
+        .agg(**agg_spec)
+        .reset_index()
+    )
+
+    band_summary.to_csv(diag_dir / "tt_pred_band_summary.csv", index=False)
+
+    # --------------------------------------------------------
+    # Crosstaby: czy band zależy od T / nodes / current_nodes?
+    # --------------------------------------------------------
+    for col in ["timesteps_total", "timesteps_eval", "nodes", "current_nodes", "nodes_to_copy", "eval_values"]:
+        if col in ok_df.columns:
+            ct = pd.crosstab(ok_df[col], ok_df["tt_pred_band"])
+            ct.to_csv(diag_dir / f"band_crosstab_by_{col}.csv")
+
+            group = (
+                ok_df
+                .groupby([col, "tt_pred_band"], observed=True)
+                .agg(
+                    n_files=("file_name", "count"),
+                    tt_pred_mean=("tt_pred", "mean"),
+                    tt_pred_std=("tt_pred", "std"),
+                    tt_real_mean=("tt_real", "mean"),
+                    tt_rel_diff_mean=("tt_rel_diff", "mean"),
+                    mae_eval_mean=("mae_eval", "mean"),
+                )
+                .reset_index()
+            )
+            group.to_csv(diag_dir / f"band_summary_by_{col}.csv", index=False)
+
+    # --------------------------------------------------------
+    # Korelacje cech z TT_pred
+    # --------------------------------------------------------
+    numeric_cols = list(ok_df.select_dtypes(include=[np.number]).columns)
+
+    corr_rows = []
+    target = ok_df["tt_pred"]
+
+    for c in numeric_cols:
+        if c == "tt_pred":
+            continue
+
+        s = pd.to_numeric(ok_df[c], errors="coerce")
+        tmp = pd.DataFrame({"x": s, "y": target}).replace([np.inf, -np.inf], np.nan).dropna()
+
+        if len(tmp) < 3 or tmp["x"].nunique() < 2:
+            continue
+
+        corr_rows.append({
+            "feature": c,
+            "n": int(len(tmp)),
+            "pearson_with_tt_pred": float(tmp["x"].corr(tmp["y"], method="pearson")),
+            "spearman_with_tt_pred": float(tmp["x"].corr(tmp["y"], method="spearman")),
+            "abs_spearman_with_tt_pred": float(abs(tmp["x"].corr(tmp["y"], method="spearman"))),
+        })
+
+    corr_df = pd.DataFrame(corr_rows)
+
+    if not corr_df.empty:
+        corr_df = corr_df.sort_values("abs_spearman_with_tt_pred", ascending=False)
+        corr_df.to_csv(diag_dir / "correlations_with_tt_pred.csv", index=False)
+
+    # --------------------------------------------------------
+    # Separacja cech low vs high
+    # --------------------------------------------------------
+    sep_rows = []
+
+    for c in numeric_cols:
+        s = pd.to_numeric(ok_df[c], errors="coerce")
+        tmp = pd.DataFrame({
+            "feature_value": s,
+            "band": ok_df["tt_pred_band"],
+        }).replace([np.inf, -np.inf], np.nan).dropna()
+
+        low = tmp.loc[tmp["band"] == "low", "feature_value"]
+        high = tmp.loc[tmp["band"] == "high", "feature_value"]
+
+        if len(low) == 0 or len(high) == 0:
+            continue
+
+        low_std = float(low.std(ddof=1)) if len(low) > 1 else 0.0
+        high_std = float(high.std(ddof=1)) if len(high) > 1 else 0.0
+        pooled_std = math.sqrt((low_std ** 2 + high_std ** 2) / 2.0)
+
+        low_mean = float(low.mean())
+        high_mean = float(high.mean())
+        diff = high_mean - low_mean
+
+        sep_rows.append({
+            "feature": c,
+            "n_low": int(len(low)),
+            "n_high": int(len(high)),
+            "low_mean": low_mean,
+            "high_mean": high_mean,
+            "high_minus_low": float(diff),
+            "low_std": low_std,
+            "high_std": high_std,
+            "standardized_diff": float(diff / pooled_std) if pooled_std > 0 else np.nan,
+            "low_min": float(low.min()),
+            "low_max": float(low.max()),
+            "high_min": float(high.min()),
+            "high_max": float(high.max()),
+        })
+
+    sep_df = pd.DataFrame(sep_rows)
+
+    if not sep_df.empty:
+        sep_df["abs_standardized_diff"] = sep_df["standardized_diff"].abs()
+        sep_df = sep_df.sort_values("abs_standardized_diff", ascending=False)
+        sep_df.to_csv(diag_dir / "feature_separation_low_vs_high.csv", index=False)
+
+    # --------------------------------------------------------
+    # Regresja globalnie i osobno w pasmach
+    # --------------------------------------------------------
+    reg_rows = [_linear_fit_summary("all", ok_df)]
+
+    for band_name, sub in ok_df.groupby("tt_pred_band", observed=True):
+        reg_rows.append(_linear_fit_summary(str(band_name), sub))
+
+    pd.DataFrame(reg_rows).to_csv(diag_dir / "linear_fit_pred_vs_real_by_band.csv", index=False)
+
+    # --------------------------------------------------------
+    # Zbiorczy JSON collapse
+    # --------------------------------------------------------
+    y_range = float(np.max(y) - np.min(y)) if len(y) else np.nan
+    x_range = float(np.max(x) - np.min(x)) if len(x) else np.nan
+
+    y_std = float(np.std(y, ddof=1)) if len(y) > 1 else np.nan
+    x_std = float(np.std(x, ddof=1)) if len(x) > 1 else np.nan
+
+    if len(sorted_df) >= 2:
+        largest_gap = float(np.nanmax(sorted_df["gap_to_next_tt_pred"]))
+    else:
+        largest_gap = np.nan
+
+    summary = {
+        "n_files": int(len(ok_df)),
+
+        "tt_pred_center_low": float(centers[0]),
+        "tt_pred_center_high": float(centers[1]),
+        "tt_pred_center_gap": float(centers[1] - centers[0]),
+        "tt_pred_band_threshold": float(threshold) if np.isfinite(threshold) else np.nan,
+
+        "tt_pred_min": float(np.min(y)),
+        "tt_pred_max": float(np.max(y)),
+        "tt_pred_range": y_range,
+        "tt_pred_std": y_std,
+
+        "tt_real_min": float(np.min(x)),
+        "tt_real_max": float(np.max(x)),
+        "tt_real_range": x_range,
+        "tt_real_std": x_std,
+
+        "pred_range_over_real_range": float(y_range / x_range) if x_range != 0 else np.nan,
+        "pred_std_over_real_std": float(y_std / x_std) if x_std != 0 else np.nan,
+
+        "largest_gap_between_sorted_tt_pred": largest_gap,
+        "largest_gap_fraction_of_pred_range": (
+            float(largest_gap / y_range)
+            if np.isfinite(largest_gap) and y_range != 0
+            else np.nan
+        ),
+
+        "low_band_count": int((ok_df["tt_pred_band"] == "low").sum()),
+        "high_band_count": int((ok_df["tt_pred_band"] == "high").sum()),
+    }
+
+    with open(diag_dir / "collapse_summary.json", "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False)
+
+    # --------------------------------------------------------
+    # Wykresy
+    # --------------------------------------------------------
+    plt.figure(figsize=(9, 5))
+    plt.hist(ok_df["tt_pred"].to_numpy(dtype=float), bins=min(60, max(10, len(ok_df) // 4)))
+    plt.axvline(centers[0], linestyle="--", linewidth=1.5, label=f"center low = {centers[0]:.3g}")
+    plt.axvline(centers[1], linestyle="--", linewidth=1.5, label=f"center high = {centers[1]:.3g}")
+
+    if np.isfinite(threshold):
+        plt.axvline(threshold, linestyle=":", linewidth=1.5, label=f"threshold = {threshold:.3g}")
+
+    plt.title("Histogram TT_pred — diagnostyka dwóch poziomów")
+    plt.xlabel("TT_pred")
+    plt.ylabel("liczba plików")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(diag_dir / "tt_pred_histogram_two_bands.png", dpi=240)
+    plt.close()
+
+    plt.figure(figsize=(9, 6))
+    for band_name, sub in ok_df.groupby("tt_pred_band", observed=True):
+        plt.scatter(
+            sub["tt_real"],
+            sub["tt_pred"],
+            alpha=0.65,
+            label=f"{band_name}, n={len(sub)}",
+        )
+
+    lo = float(min(ok_df["tt_real"].min(), ok_df["tt_pred"].min()))
+    hi = float(max(ok_df["tt_real"].max(), ok_df["tt_pred"].max()))
+    pad = 0.03 * (hi - lo) if hi > lo else 1.0
+
+    plt.plot([lo - pad, hi + pad], [lo - pad, hi + pad], linestyle="--", linewidth=1, label="real = pred")
+    plt.title("Real TT vs predicted TT — kolor wg pasma TT_pred")
+    plt.xlabel("Ground truth TT")
+    plt.ylabel("Predicted TT")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(diag_dir / "real_vs_pred_tt_colored_by_band.png", dpi=240)
+    plt.close()
+
+    if "timesteps_total" in ok_df.columns:
+        plt.figure(figsize=(10, 6))
+        for band_name, sub in ok_df.groupby("tt_pred_band", observed=True):
+            plt.scatter(
+                sub["timesteps_total"],
+                sub["tt_pred"],
+                alpha=0.65,
+                label=f"{band_name}, n={len(sub)}",
+            )
+
+        plt.title("TT_pred vs T — czy poziomy zależą od długości sekwencji?")
+        plt.xlabel("timesteps_total / T")
+        plt.ylabel("TT_pred")
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(diag_dir / "tt_pred_vs_T_colored_by_band.png", dpi=240)
+        plt.close()
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(sorted_df["rank_by_tt_pred"], sorted_df["tt_pred"], marker=".", linewidth=1)
+    plt.axhline(centers[0], linestyle="--", linewidth=1, label="center low")
+    plt.axhline(centers[1], linestyle="--", linewidth=1, label="center high")
+
+    if np.isfinite(threshold):
+        plt.axhline(threshold, linestyle=":", linewidth=1, label="threshold")
+
+    plt.title("TT_pred posortowane rosnąco — widoczność przerwy między poziomami")
+    plt.xlabel("rank po TT_pred")
+    plt.ylabel("TT_pred")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(diag_dir / "tt_pred_sorted_curve.png", dpi=240)
+    plt.close()
+
+    print("\n=== TWO-BAND / COLLAPSE DIAGNOSTICS ===")
+    print(json.dumps(summary, indent=2, ensure_ascii=False))
+    print(f"Zapisano diagnostykę dwóch poziomów w: {diag_dir}")
+
 
 def main():
     parser = build_parser()
@@ -1580,6 +2271,8 @@ def main():
 
     # Szczegółowe statystyki opisowe
     save_detailed_tt_descriptive_stats(batch_dir, per_file_df)
+    # Diagnostyka dwóch poziomów / collapse do baseline'u
+    save_two_band_collapse_diagnostics(batch_dir, per_file_df)
 
     print("\n=== PODSUMOWANIE ZBIORCZE ===", flush=True)
     print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)
