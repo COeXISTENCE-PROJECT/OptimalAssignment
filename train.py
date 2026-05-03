@@ -15,10 +15,12 @@ import random
 import pandas as pd
 import csv
 import json
+import wandb
+
 # from your_dataset_module import make_qA_loader
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--device', type=str, default='cuda:3', help='')
+parser.add_argument('--device', type=str, default='cpu', help='')
 parser.add_argument('--data', type=str, default='/scratch/tmp', help='data root path')
 parser.add_argument('--q_dir', type=str, default='/scratch/tmp/vec_flows_10s', help='flow directory')
 parser.add_argument('--a_dir', type=str, default='/scratch/tmp/vec_assignments_10s', help='assignment directory')
@@ -67,6 +69,11 @@ parser.add_argument('--kernel_size', type=int, default=2, help='convolution kern
 parser.add_argument('--blocks', type=int, default=4, help='number of ST blocks')
 parser.add_argument('--layers', type=int, default=2, help='number of layers in one spatial or temporal network')
 parser.add_argument('--num_workers', type=int, default=4, help='dataloader workers')
+
+parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
+parser.add_argument("--wandb_project", type=str, default="OptimalAssignment")
+parser.add_argument("--wandb_entity", type=str, default=None)
+parser.add_argument("--wandb_run_name", type=str, default=None)
 
 args = parser.parse_args()
 
@@ -243,6 +250,11 @@ def evaluate_loader(engine, loader):
 
 def main():
     device = torch.device(args.device)
+    wandb.init(
+        project="adttp",
+        entity="lime-pss-uniwersytet-jagiello-ski-w-krakowie",
+        config=vars(args) if "args" in globals() else None,
+    )
 
     if args.adjdata is None:
         raise ValueError("Podaj --adjdata z plikiem hex_adjacency_matrix.csv")
@@ -251,7 +263,13 @@ def main():
     print(f"Loaded CSV adjacency from {args.adjdata}")
 
     print(args)
-
+    if args.wandb:
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.wandb_run_name,
+            config=vars(args),
+        )
     if args.randomadj:
         adjinit = None
     else:
@@ -371,7 +389,21 @@ def main():
         for iter_idx, batch in enumerate(train_loader):
             metrics = engine.train(batch)
             update_metric_acc(train_acc, metrics, batch)
+            if args.wandb:
+                global_step = (i - 1) * len(train_loader) + iter_idx
 
+                wandb.log(
+                    {
+                        "iter/train_loss": metrics["loss"],
+                        "iter/train_mae": metrics["mae"],
+                        "iter/train_mape": metrics["mape"],
+                        "iter/train_rmse": metrics["rmse"],
+                        "iter/train_adj_mape": metrics["adj_mape"],
+                        "iter/train_flow_cons": metrics["flow_cons"],
+                        "epoch": i,
+                    },
+                    step=global_step,
+                )
             if iter_idx % args.print_every == 0:
                 log = (
                     'Iter: {:03d}, '
@@ -436,7 +468,30 @@ def main():
             raise ValueError(f"Unsupported monitor: {args.monitor}")
 
         monitor_history.append(monitor_value)
+        if args.wandb:
+            wandb.log(
+                {
+                    "epoch/train_loss": mtrain_loss,
+                    "epoch/train_mae": mtrain_mae,
+                    "epoch/train_mape": mtrain_mape,
+                    "epoch/train_rmse": mtrain_rmse,
+                    "epoch/train_adj_mape": mtrain_adj_mape,
+                    "epoch/train_flow_cons": mtrain_flow_cons,
 
+                    "epoch/valid_loss": mvalid_loss,
+                    "epoch/valid_mae": mvalid_mae,
+                    "epoch/valid_mape": mvalid_mape,
+                    "epoch/valid_rmse": mvalid_rmse,
+                    "epoch/valid_adj_mape": mvalid_adj_mape,
+                    "epoch/valid_flow_cons": mvalid_flow_cons,
+
+                    f"monitor/{args.monitor}": monitor_value,
+                    "time/train_epoch": t2 - t1,
+                    "time/val_epoch": s2 - s1,
+                    "epoch": i,
+                },
+                step=i * len(train_loader),
+            )
         history['epoch'].append(i)
         history['train_loss'].append(mtrain_loss)
         history['train_mae'].append(mtrain_mae)
@@ -538,6 +593,12 @@ def main():
     plt.close()
     print(f"saved learning curves to: {plot_path}")
 
+    if args.wandb:
+        wandb.log({
+            "artifacts/learning_curves": wandb.Image(plot_path),
+            "artifacts/training_metrics": wandb.Table(dataframe=df_metrics),
+        })
+
     bestid = np.argmin(monitor_history)
     best_path = args.save + "_epoch_" + str(bestid + 1) + "_" + str(round(monitor_history[bestid], 4)) + ".pth"
     engine.model.load_state_dict(torch.load(best_path, map_location=device))
@@ -547,7 +608,16 @@ def main():
     print("Optimization loss used during training: {}".format(args.loss.upper()))
 
     test_metrics = evaluate_loader(engine, test_loader)
-
+    if args.wandb:
+        wandb.log({
+            "test/mae": test_metrics["mae"],
+            "test/mape": test_metrics["mape"],
+            "test/rmse": test_metrics["rmse"],
+            "test/adj_mape": test_metrics["adj_mape"],
+            "test/flow_cons": test_metrics["flow_cons"],
+            "best/epoch": bestid + 1,
+            f"best/valid_{args.monitor}": monitor_history[bestid],
+        })
     print(
         'Test MAE: {:.4f}, Test MAPE: {:.4f}, Test RMSE: {:.4f}, Test ADJ_MAPE: {:.4f}, Test FLOW_CONS: {:.4f}'.format(
             test_metrics["mae"],
@@ -562,7 +632,8 @@ def main():
         engine.model.state_dict(),
         args.save + "_exp" + str(args.expid) + "_best_" + str(round(monitor_history[bestid], 4)) + ".pth"
     )
-
+    if args.wandb:
+        wandb.finish()
 
 if __name__ == "__main__":
     main()

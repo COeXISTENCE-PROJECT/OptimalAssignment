@@ -7,19 +7,20 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 import sys
+import wandb
+import os
 
-
-PYTHON_BIN = "/home/drozd/miniconda/envs/wavenet_env/bin/python"
-PROJECT_DIR = Path("/home/drozd/OptimalAssignment").resolve()
+PYTHON_BIN = "/home/gorczyca/miniconda3/envs/wavenet_env/bin/python"
+PROJECT_DIR = Path("/home/gorczyca/OptimalAssignment").resolve()
 
 # ===== dane =====
-Q_DIR = "/scratch/tmp/elite_1k_exps/new_flows_10s"
-A_DIR = "/scratch/tmp/elite_1k_exps/new_assignments_10s"
+Q_DIR = "/scratch/tmp/1k_grid/new_flows_10s"
+A_DIR = "/scratch/tmp/1k_grid/new_assignments_10s"
 DATA_ROOT = "/scratch/tmp"
 ADJDATA = "/scratch/tmp/21k_exps/21k_hex_adjacency_matrix.csv"
 
 # ===== główny katalog pipeline =====
-PIPELINE_ROOT = Path("/scratch/tmp/ADTTP_tests_new")
+PIPELINE_ROOT = Path("/scratch/tmp/g_ADTTP_tests_new")
 RUN_STAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
 RUN_NAME = f"run_{RUN_STAMP}"
 RUN_DIR = PIPELINE_ROOT / RUN_NAME
@@ -32,7 +33,7 @@ INFER_DIR = RUN_DIR / "inference"
 VIS_DIR = RUN_DIR / "visual"
 
 # ===== sprzęt / split =====
-DEVICE = "cuda:0"
+DEVICE = "cpu"
 SEED = 42
 TRAIN_RATIO = 0.7
 VAL_RATIO = 0.1
@@ -93,6 +94,13 @@ NUM_BEST_NODES = 5
 NUM_MIDDLE_NODES = 5
 NUM_WORST_NODES = 5
 
+# ===== Weights & Biases =====
+WANDB_ENABLED = True
+WANDB_PROJECT = "adttp"
+WANDB_ENTITY = "lime-pps-uniwersytet-jagiello-ski-w-krakowie"
+WANDB_RUN_NAME = RUN_NAME
+WANDB_MODE = "online"  # "online", "offline" albo "disabled"
+WANDB_DIR = RUN_DIR / "wandb"
 
 #tools
 
@@ -106,12 +114,16 @@ def print_header(title: str):
     print("=" * 90)
 
 
-def run_command(cmd, cwd=None, log_file: Path | None = None):
+def run_command(cmd, cwd=None, log_file: Path | None = None, env: dict | None = None):
     printable = " ".join(shlex.quote(str(x)) for x in cmd)
     print(f"\n[RUN] {printable}\n")
 
+    merged_env = os.environ.copy()
+    if env is not None:
+        merged_env.update(env)
+
     if log_file is None:
-        subprocess.run(cmd, cwd=cwd, check=True)
+        subprocess.run(cmd, cwd=cwd, check=True, env=merged_env)
         return
 
     log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -124,6 +136,7 @@ def run_command(cmd, cwd=None, log_file: Path | None = None):
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            env=merged_env,
         )
 
         assert proc.stdout is not None
@@ -140,6 +153,16 @@ def append_bool_flag(cmd: list, flag_name: str, value: bool):
     if value:
         cmd.append(flag_name)
 
+def build_wandb_env():
+    if not WANDB_ENABLED:
+        return None
+
+    WANDB_DIR.mkdir(parents=True, exist_ok=True)
+
+    return {
+        "WANDB_DIR": str(WANDB_DIR),
+        "WANDB_MODE": WANDB_MODE,
+    }
 
 def find_best_checkpoint(train_dir: Path, expid: int | None = None) -> Path:
     """
@@ -247,6 +270,14 @@ def save_pipeline_config(best_checkpoint: Path | None = None):
     config = {
         "run_name": RUN_NAME,
         "run_dir": str(RUN_DIR),
+        "wandb": {
+            "enabled": WANDB_ENABLED,
+            "project": WANDB_PROJECT,
+            "entity": WANDB_ENTITY,
+            "run_name": WANDB_RUN_NAME,
+            "mode": WANDB_MODE,
+            "dir": str(WANDB_DIR),
+        },
         "training_dir": str(TRAIN_PREFIX),
         "inference_dir": str(INFER_DIR),
         "visual_dir": str(VIS_DIR),
@@ -374,6 +405,14 @@ def build_train_command():
     append_bool_flag(cmd, "--addaptadj", ADDAPTADJ)
     append_bool_flag(cmd, "--randomadj", RANDOMADJ)
 
+    if WANDB_ENABLED:
+        cmd.append("--wandb")
+        cmd.extend(["--wandb_project", WANDB_PROJECT])
+        cmd.extend(["--wandb_run_name", WANDB_RUN_NAME])
+
+        if WANDB_ENTITY is not None:
+            cmd.extend(["--wandb_entity", WANDB_ENTITY])
+
     return cmd
 
 
@@ -474,7 +513,8 @@ def main():
     # 1. trening
     print_header("ETAP 1: TRENING")
     train_cmd = build_train_command()
-    run_command(train_cmd, cwd=PROJECT_DIR, log_file=LOGS_DIR / "train.log")
+    wandb_env = build_wandb_env()
+    run_command(train_cmd, cwd=PROJECT_DIR, log_file=LOGS_DIR / "train.log", env=wandb_env)
 
     # 2. najlepszy checkpoint
     print_header("ETAP 2: WYBÓR CHECKPOINTU")
@@ -504,7 +544,6 @@ def main():
 
     print_header("ETAP 5: ZBIERANIE KLUCZOWYCH WYNIKÓW")
     collect_key_results()
-
 
 if __name__ == "__main__":
     main()

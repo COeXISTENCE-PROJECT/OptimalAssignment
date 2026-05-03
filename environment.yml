@@ -81,4 +81,4 @@ dependencies:
       - torch==2.10.0
       - triton==3.6.0
       - typing-extensions==4.15.0
-prefix: /home/drozd/miniconda/envs/wavenet_env
+prefix: /home/gorczyca/miniconda3/envs/wavenet_env
