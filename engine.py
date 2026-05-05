@@ -34,7 +34,8 @@ class TrainerADTTP:
         attention_num_heads=4,
         attention_ff_dim=64,
         loss_name="mae",
-        alpha = "1"
+        alpha = "1",
+        huber_delta="1",
     ):
         self.device = device
 
@@ -77,6 +78,9 @@ class TrainerADTTP:
         self.loss_name = loss_name.lower()
         if not 0.0 <= alpha <= 1.0:
             raise ValueError(f"alpha must be in [0, 1], got {alpha}")
+        self.hyber_delta = float(huber_delta)
+        if self.huber_delta <= 0:
+            raise ValueError(f"huber_delta must be positive, got {self.huber_delta}")
         self.alpha = alpha
         self.loss = self._get_loss_fn(self.loss_name)
 
@@ -100,6 +104,21 @@ class TrainerADTTP:
 
     def _rmse(self, pred, real):
         return torch.sqrt(torch.mean((pred - real) ** 2))
+
+    def _huber(self, pred, real):
+        error = pred - real
+        abs_error = torch.abs(error)
+
+        delta = torch.tensor(
+            self.huber_delta,
+            dtype=pred.dtype,
+            device=pred.device,
+        )
+
+        quadratic = torch.minimum(abs_error, delta)
+        linear = abs_error - quadratic
+        loss = 0.5 * quadratic ** 2 + delta * linear
+        return torch.mean(loss)
 
     def _adj_mape(self, pred, real, offset=1.0):
         return torch.mean(torch.abs(pred - real) / (real + offset))
@@ -128,6 +147,8 @@ class TrainerADTTP:
             return self._rmse
         elif loss_name == "adj_mape":
             return self._adj_mape
+        elif loss_name == "huber":
+            return self._huber
         elif loss_name == "flow_cons":
             return self._flow_cons
         else:
@@ -142,6 +163,7 @@ class TrainerADTTP:
             "adj_mape": self._adj_mape(pred, real).item(),
             "flow_cons": self._flow_cons(pred, real).item(),
             "mae_adj_mape_loss": self._mae_with_adj_mape(pred, real).item(),
+            "huber": self._huber(pred, real).item(),
         }
 
     def _unpack_batch(self, batch_or_q, a=None, real_val=None, lengths=None):
