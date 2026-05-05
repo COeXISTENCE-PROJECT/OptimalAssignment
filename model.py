@@ -1093,3 +1093,115 @@ class GraphWaveNetBackbone(gwnet):
         if len(results) == 1:
             return results[0]
         return tuple(results)
+
+class STAEformerBackbone(nn.Module):
+    """
+    Adapter STAEformer zgodny z GraphWaveNetBackbone.forward_features.
+
+    Wejście:
+        q: (B, T, N)
+
+    Wyjście:
+        features: (B, model_dim, N, T)
+    """
+
+    def __init__(
+        self,
+        *,
+        num_nodes: int,
+        in_steps: int,
+        node_pooling: str = "mean",
+        input_embedding_dim: int = 24,
+        spatial_embedding_dim: int = 0,
+        adaptive_embedding_dim: int = 80,
+        feed_forward_dim: int = 256,
+        num_heads: int = 4,
+        num_layers: int = 3,
+        dropout: float = 0.1,
+        steps_per_day: int = 288,
+    ):
+        super().__init__()
+
+        self.encoder = STAEformer(
+            num_nodes=num_nodes,
+            in_steps=in_steps,
+            out_steps=1,
+            steps_per_day=steps_per_day,
+            input_dim=1,
+            output_dim=1,
+            input_embedding_dim=input_embedding_dim,
+            tod_embedding_dim=0,
+            dow_embedding_dim=0,
+            spatial_embedding_dim=spatial_embedding_dim,
+            adaptive_embedding_dim=adaptive_embedding_dim,
+            feed_forward_dim=feed_forward_dim,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            dropout=dropout,
+            use_mixed_proj=True,
+        )
+
+        if self.encoder.model_dim % num_heads != 0:
+            raise ValueError(
+                f"STAEformer model_dim={self.encoder.model_dim} musi być podzielne "
+                f"przez num_heads={num_heads}."
+            )
+
+        self.num_nodes = num_nodes
+        self.in_steps = in_steps
+        self.node_pooling = node_pooling
+        self.out_channels = self.encoder.model_dim
+
+    def forward_features(self, q: torch.Tensor) -> torch.Tensor:
+        """
+        q: (B, T, N)
+        return: (B, C, N, T)
+        """
+        if q.dim() != 3:
+            raise ValueError(f"q must have shape (B, T, N), got {tuple(q.shape)}")
+
+        if q.size(1) != self.in_steps:
+            raise ValueError(
+                f"STAEformerBackbone expected T={self.in_steps}, got T={q.size(1)}"
+            )
+
+        if q.size(2) != self.num_nodes:
+            raise ValueError(
+                f"STAEformerBackbone expected N={self.num_nodes}, got N={q.size(2)}"
+            )
+
+        enc = self.encoder
+        batch_size = q.size(0)
+
+        # (B, T, N) -> (B, T, N, 1)
+        x = q.unsqueeze(-1)
+
+        x = enc.input_proj(x)  # (B, T, N, input_embedding_dim)
+        features = [x]
+
+        if enc.spatial_embedding_dim > 0:
+            spatial_emb = enc.node_emb.expand(
+                batch_size,
+                enc.in_steps,
+                *enc.node_emb.shape,
+            )
+            features.append(spatial_emb)
+
+        if enc.adaptive_embedding_dim > 0:
+            adaptive_emb = enc.adaptive_embedding.expand(
+                batch_size,
+                *enc.adaptive_embedding.shape,
+            )
+            features.append(adaptive_emb)
+
+        x = torch.cat(features, dim=-1)  # (B, T, N, model_dim)
+
+        for attn in enc.attn_layers_t:
+            x = attn(x, dim=1)
+
+        for attn in enc.attn_layers_s:
+            x = attn(x, dim=2)
+
+        # GraphWaveNetBackbone.forward_features daje (B, C, N, T_out),
+        # więc zwracamy taki sam układ.
+        return x.permute(0, 3, 2, 1).contiguous()

@@ -10,7 +10,7 @@ from model import (
     AttentionRepresentation,
     fuse,
 )
-
+from model import STAEformerBackbone
 
 class ADTTP(nn.Module):
     """
@@ -52,6 +52,10 @@ class ADTTP(nn.Module):
         attention_num_heads: int = 4,
         attention_ff_dim: int = 64,
         gwnet_kwargs: dict | None = None,
+        q_backbone: str = "gwnet",  # "gwnet" albo "staeformer"
+        q_len: int | None = None,
+        staeformer_kwargs: dict | None = None,
+        q_node_pooling: str = "mean",
         default_use_gate=True,
         default_hard_gate=False,
         default_gate_threshold=0.5,
@@ -87,16 +91,49 @@ class ADTTP(nn.Module):
         self.fuse_method = canonical_fuse_method
 
         # q encoder
-        self.q_encoder = GraphWaveNetBackbone(
-            device=device,
-            num_nodes=num_nodes,
-            in_dim=1,
-            dropout=dropout,
-            **gwnet_kwargs,
-        )
+        if q_in_dim != 1:
+            raise ValueError(
+                "Ten ADTTP zakłada wejście q jako (B, T, N), czyli jedną cechę na węzeł. "
+                "Ustaw q_in_dim=1."
+            )
 
-        # GraphWaveNetBackbone.forward_features -> (B, skip_channels, N, T_out)
-        self.q_backbone_dim = self.q_encoder.end_conv_1.in_channels
+        self.q_backbone = q_backbone.lower()
+
+        if self.q_backbone in {"gwnet", "graphwavenet"}:
+            self.q_encoder = GraphWaveNetBackbone(
+                device=device,
+                num_nodes=num_nodes,
+                in_dim=1,
+                dropout=dropout,
+                **gwnet_kwargs,
+            )
+
+            self.q_backbone_dim = self.q_encoder.end_conv_1.in_channels
+
+        elif self.q_backbone in {"staeformer", "steaformer"}:
+            staeformer_kwargs = dict(staeformer_kwargs or {})
+
+            if q_len is None:
+                q_len = staeformer_kwargs.pop("in_steps", None)
+
+            if q_len is None:
+                raise ValueError(
+                    "Dla STAEformer musisz podać q_len, bo adaptive_embedding zależy "
+                    "od długości wejścia T."
+                )
+
+            self.q_encoder = STAEformerBackbone(
+                num_nodes=num_nodes,
+                in_steps=q_len,
+                node_pooling=q_node_pooling,
+                dropout=dropout,
+                **staeformer_kwargs,
+            )
+
+            self.q_backbone_dim = self.q_encoder.out_channels
+
+        else:
+            raise ValueError(f"Unknown q_backbone: {q_backbone}")
 
         self.q_projector = nn.Sequential(
             nn.Linear(self.q_backbone_dim, q_rep_dim),
