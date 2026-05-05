@@ -11,6 +11,7 @@ import torch
 import numpy as np
 from pathlib import Path
 from torch.utils.data import Dataset
+from collections import OrderedDict
 import random
 
 
@@ -31,6 +32,10 @@ class SumoFolderDataset(Dataset):
         self.assign_dir = Path(assign_dir)
         self.dtype = dtype
         self.target_nodes = target_nodes
+
+        self.cache_size = 32
+        self._flow_cache = OrderedDict()
+        self._assign_cache = OrderedDict()
 
         self.seq_length_q = seq_length_q
         self.seq_length_a = seq_length_a
@@ -89,6 +94,21 @@ class SumoFolderDataset(Dataset):
         self.seq_length_a = seq_length_a
         self.seq_length_y = seq_length_y
 
+    def _cached_load(self, cache, path):
+        key = path.name
+
+        arr = cache.get(key)
+        if arr is not None:
+            cache.move_to_end(key)
+            return arr
+
+        arr = np.load(path, mmap_mode="r")
+        cache[key] = arr
+
+        if len(cache) > self.cache_size:
+            cache.popitem(last=False)
+
+        return arr
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -101,8 +121,8 @@ class SumoFolderDataset(Dataset):
         y_start = t_end + 1
         y_end = y_start + self.seq_length_y
 
-        flow = np.load(self.flow_dir / f_name, mmap_mode="r")
-        assign = np.load(self.assign_dir / f_name, mmap_mode="r")
+        flow = self._cached_load(self._flow_cache, self.flow_dir / f_name)
+        assign = self._cached_load(self._assign_cache, self.assign_dir / f_name)
 
         current_nodes = flow.shape[0]
         nodes_to_copy = min(current_nodes, self.target_nodes)
@@ -186,10 +206,10 @@ class SumoFolderDataset(Dataset):
 
         return {
             "x": {
-                "q": torch.from_numpy(q_padded.copy()).to(self.dtype),  # (Tq, N)
-                "a": torch.from_numpy(a_padded.copy()).to(self.dtype),  # (Ta, N)
+                "q": torch.from_numpy(q_padded).to(self.dtype),
+                "a": torch.from_numpy(a_padded).to(self.dtype),
             },
-            "y": torch.from_numpy(y_out.copy()).to(self.dtype),  # (N) lub (Hy, N)
+            "y": torch.from_numpy(y_out).to(self.dtype),
         }
 
 
