@@ -11,6 +11,7 @@ import torch
 import numpy as np
 from pathlib import Path
 from torch.utils.data import Dataset
+from collections import OrderedDict
 import random
 
 
@@ -19,16 +20,22 @@ class SumoFolderDataset(Dataset):
         self,
         flow_dir: str | Path,
         assign_dir: str | Path,
+        file_names: list[str] | None = None,
         seq_length_q: int = 15,
         seq_length_a: int = 30,
         seq_length_y: int = 1,
         target_nodes: int = 195,
         dtype: torch.dtype = torch.float32,
     ) -> None:
+
         self.flow_dir = Path(flow_dir)
         self.assign_dir = Path(assign_dir)
         self.dtype = dtype
         self.target_nodes = target_nodes
+
+        self.cache_size = 32
+        self._flow_cache = OrderedDict()
+        self._assign_cache = OrderedDict()
 
         self.seq_length_q = seq_length_q
         self.seq_length_a = seq_length_a
@@ -42,11 +49,25 @@ class SumoFolderDataset(Dataset):
         flow_files = {f.name: f for f in self.flow_dir.glob("*.npy")}
         assign_files = {f.name: f for f in self.assign_dir.glob("*.npy")}
 
-        self.exp_files = sorted(set(flow_files.keys()) & set(assign_files.keys()))
-        if not self.exp_files:
+        common_files = sorted(set(flow_files.keys()) & set(assign_files.keys()))
+
+        if not common_files:
             raise RuntimeError(
                 f"No common .npy files found between {self.flow_dir} and {self.assign_dir}"
             )
+
+        if file_names is None:
+            self.exp_files = common_files
+        else:
+            selected = [Path(f).name for f in file_names]
+            missing = sorted(set(selected) - set(common_files))
+
+            if missing:
+                raise RuntimeError(
+                    f"Some selected files are missing in flow/assign dirs, e.g. {missing[:5]}"
+                )
+
+            self.exp_files = selected
 
         self.samples = []
 
@@ -73,6 +94,21 @@ class SumoFolderDataset(Dataset):
         self.seq_length_a = seq_length_a
         self.seq_length_y = seq_length_y
 
+    def _cached_load(self, cache, path):
+        key = path.name
+
+        arr = cache.get(key)
+        if arr is not None:
+            cache.move_to_end(key)
+            return arr
+
+        arr = np.load(path, mmap_mode="r")
+        cache[key] = arr
+
+        if len(cache) > self.cache_size:
+            cache.popitem(last=False)
+
+        return arr
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -85,8 +121,8 @@ class SumoFolderDataset(Dataset):
         y_start = t_end + 1
         y_end = y_start + self.seq_length_y
 
-        flow = np.load(self.flow_dir / f_name, mmap_mode="r")
-        assign = np.load(self.assign_dir / f_name, mmap_mode="r")
+        flow = self._cached_load(self._flow_cache, self.flow_dir / f_name)
+        assign = self._cached_load(self._assign_cache, self.assign_dir / f_name)
 
         current_nodes = flow.shape[0]
         nodes_to_copy = min(current_nodes, self.target_nodes)
@@ -101,7 +137,6 @@ class SumoFolderDataset(Dataset):
         a_end = t_end + 1
 
         # maska pozycji, które są zerowe przez całe okno a
-        a_zeros = np.any(a_padded != 0, axis=0).astype(np.float32)  # 0 = zerowy node, 1 = aktywny
 
         if assign.ndim == 2:
             # assign jako (N, T)
@@ -171,11 +206,10 @@ class SumoFolderDataset(Dataset):
 
         return {
             "x": {
-                "q": torch.from_numpy(q_padded.copy()).to(self.dtype),  # (Tq, N)
-                "a": torch.from_numpy(a_padded.copy()).to(self.dtype),  # (Ta, N)
-                "a_zeros": torch.from_numpy(a_zeros.copy()).to(self.dtype),
+                "q": torch.from_numpy(q_padded).to(self.dtype),
+                "a": torch.from_numpy(a_padded).to(self.dtype),
             },
-            "y": torch.from_numpy(y_out.copy()).to(self.dtype),  # (N) lub (Hy, N)
+            "y": torch.from_numpy(y_out).to(self.dtype),
         }
 
 
