@@ -82,6 +82,122 @@ def split_files(file_names, train_ratio=0.7, val_ratio=0.15, seed=42):
     return train_files, val_files, test_files
 
 
+class TorchGumbelScaler:
+    """
+    Scaler for Gumbel-max distributed data.
+
+    mode="standard_gumbel":
+        x -> (x - loc) / scale
+        Result should follow approximately Gumbel(0, 1).
+
+    mode="zscore":
+        x -> (x - mean) / std
+        Result has approximately mean 0 and std 1.
+
+    mode="standard_normal":
+        x -> Phi^{-1}(F_gumbel(x))
+        Result should be approximately N(0, 1).
+    """
+
+    def __init__(self, mode="standard_gumbel", eps=1e-6):
+        self.mode = mode
+        self.eps = eps
+
+        self.mean = None
+        self.std = None
+        self.loc = None
+        self.scale = None
+
+    def fit(self, data):
+        if isinstance(data, torch.Tensor):
+            x = data.detach().float().reshape(-1)
+        else:
+            x = torch.tensor(data, dtype=torch.float32).reshape(-1)
+
+        self.mean = x.mean()
+        self.std = x.std(unbiased=True)
+
+        if self.std <= 0:
+            raise ValueError("Cannot fit scaler: data has zero variance.")
+
+        gamma = 0.5772156649015329
+
+        # Method-of-moments estimates for Gumbel-max
+        self.scale = self.std * math.sqrt(6.0) / math.pi
+        self.loc = self.mean - gamma * self.scale
+
+        return self
+
+    def transform(self, data):
+        is_numpy = isinstance(data, np.ndarray)
+
+        if is_numpy:
+            x = torch.tensor(data, dtype=torch.float32)
+        else:
+            x = data.float()
+
+        loc = self.loc.to(x.device)
+        scale = self.scale.to(x.device)
+        mean = self.mean.to(x.device)
+        std = self.std.to(x.device)
+
+        y = (x - loc) / scale
+
+        if self.mode == "standard_gumbel":
+            out = y
+
+        elif self.mode == "zscore":
+            out = (x - mean) / std
+
+        elif self.mode == "standard_normal":
+            u = torch.exp(-torch.exp(-y))
+            u = torch.clamp(u, self.eps, 1.0 - self.eps)
+
+            normal = torch.distributions.Normal(
+                torch.tensor(0.0, device=x.device),
+                torch.tensor(1.0, device=x.device),
+            )
+            out = normal.icdf(u)
+
+        else:
+            raise ValueError(f"Unknown scaler mode: {self.mode}")
+
+        return out.cpu().numpy() if is_numpy else out
+
+    def inverse_transform(self, data):
+        is_numpy = isinstance(data, np.ndarray)
+
+        if is_numpy:
+            y = torch.tensor(data, dtype=torch.float32)
+        else:
+            y = data.float()
+
+        loc = self.loc.to(y.device)
+        scale = self.scale.to(y.device)
+        mean = self.mean.to(y.device)
+        std = self.std.to(y.device)
+
+        if self.mode == "standard_gumbel":
+            out = loc + scale * y
+
+        elif self.mode == "zscore":
+            out = mean + std * y
+
+        elif self.mode == "standard_normal":
+            normal = torch.distributions.Normal(
+                torch.tensor(0.0, device=y.device),
+                torch.tensor(1.0, device=y.device),
+            )
+            u = normal.cdf(y)
+            u = torch.clamp(u, self.eps, 1.0 - self.eps)
+            out = loc - scale * torch.log(-torch.log(u))
+
+        else:
+            raise ValueError(f"Unknown scaler mode: {self.mode}")
+
+        return out.cpu().numpy() if is_numpy else out
+
+
 class FileFilteredSumoDataset(Dataset):
     """
     Wrapper na SumoFolderDataset, ale ograniczony do wybranych nazw plików.
@@ -225,6 +341,30 @@ def save_learning_curves(history, out_dir):
     print(f"Wykresy zapisane do: {plot_path}")
 
 
+def fit_gumbel_scaler_from_loader(loader, use_q=True, use_y=True):
+    values = []
+
+    for batch in loader:
+        if use_q:
+            values.append(batch["x"]["q"].reshape(-1).float())
+
+        if use_y:
+            values.append(batch["y"].reshape(-1).float())
+
+    values = torch.cat(values, dim=0)
+
+    scaler = TorchGumbelScaler(mode="standard_gumbel")
+    scaler.fit(values)
+
+    print("Fitted Gumbel scaler:")
+    print(f"  mean  = {float(scaler.mean):.6f}")
+    print(f"  std   = {float(scaler.std):.6f}")
+    print(f"  loc   = {float(scaler.loc):.6f}")
+    print(f"  scale = {float(scaler.scale):.6f}")
+
+    return scaler
+
+
 def main():
     parser = argparse.ArgumentParser()
 
@@ -344,7 +484,12 @@ def main():
 
     first_batch = next(iter(train_loader))
     target_dim = infer_target_dim_from_batch(first_batch)
-    scaler = None
+
+    scaler = fit_gumbel_scaler_from_loader(
+        train_loader,
+        use_q=True,
+        use_y=True,
+    )
 
     engine = TrainerADTTP(
         scaler=scaler,
