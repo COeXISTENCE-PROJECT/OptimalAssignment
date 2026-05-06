@@ -667,7 +667,7 @@ def save_histogram_values(
 ) -> dict:
     """
     Zapisuje histogram jako CSV z koszykami.
-    Nie tworzy dodatkowego wykresu PNG, żeby finalnie były tylko dwa wykresy TT.
+    Nie tworzy dodatkowego wykresu PNG, żeby finalniertu były tylko dwa wykresy TT.
     """
     s = _clean_numeric(values)
 
@@ -687,6 +687,8 @@ def save_histogram_values(
         )
         return out
 
+
+
     effective_bins = min(int(bins), max(1, int(s.nunique())))
     counts, edges = np.histogram(s.to_numpy(dtype=float), bins=effective_bins)
 
@@ -703,6 +705,201 @@ def save_histogram_values(
 
     out["bins_effective"] = int(effective_bins)
     out["total_count"] = total
+
+    return out
+
+def select_representative_tt_peaks(ok_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Wybiera 3 reprezentatywne przypadki według real TT:
+      1) minimalny TT,
+      2) maksymalny TT,
+      3) przypadek ze środkowego kwartyla, najbliższy medianie.
+
+    Środkowy kwartyl rozumiemy tutaj jako centralny zakres:
+        Q25 <= tt_real <= Q75
+    """
+    if ok_df.empty or "tt_real" not in ok_df.columns:
+        return pd.DataFrame()
+
+    df = ok_df.copy()
+
+    numeric_cols = [
+        "tt_real",
+        "tt_pred",
+        "tt_signed_diff",
+        "tt_abs_diff",
+        "tt_signed_pct_diff",
+        "tt_abs_pct_diff",
+        "mae_eval",
+        "rmse_eval",
+    ]
+
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df[np.isfinite(df["tt_real"])].copy()
+
+    if df.empty:
+        return pd.DataFrame()
+
+    q25 = float(df["tt_real"].quantile(0.25))
+    median = float(df["tt_real"].quantile(0.50))
+    q75 = float(df["tt_real"].quantile(0.75))
+
+    selected = []
+    used_indices = set()
+
+    def _append_row(label: str, selection_rule: str, idx):
+        row = df.loc[idx].copy()
+        row["peak_label"] = label
+        row["selection_rule"] = selection_rule
+        row["tt_real_q25"] = q25
+        row["tt_real_median"] = median
+        row["tt_real_q75"] = q75
+        selected.append(row)
+        used_indices.add(idx)
+
+    min_idx = df["tt_real"].idxmin()
+    max_idx = df["tt_real"].idxmax()
+
+    _append_row(
+        "min_tt_real",
+        "minimum tt_real over OK files",
+        min_idx,
+    )
+
+    middle_df = df[
+        (df["tt_real"] >= q25) &
+        (df["tt_real"] <= q75)
+    ].copy()
+
+    # Staramy się nie wybrać drugi raz min/max jako punktu środkowego.
+    middle_unique_df = middle_df.drop(
+        index=list(used_indices | {max_idx}),
+        errors="ignore",
+    )
+
+    if middle_unique_df.empty:
+        middle_unique_df = middle_df
+
+    if not middle_unique_df.empty:
+        middle_idx = (middle_unique_df["tt_real"] - median).abs().idxmin()
+
+        _append_row(
+            "middle_quartile_tt_real",
+            "closest to median tt_real among files with Q25 <= tt_real <= Q75",
+            middle_idx,
+        )
+
+    _append_row(
+        "max_tt_real",
+        "maximum tt_real over OK files",
+        max_idx,
+    )
+
+    peaks_df = pd.DataFrame(selected)
+
+    preferred_cols = [
+        "peak_label",
+        "selection_rule",
+        "selected_index",
+        "file_name",
+        "tt_real",
+        "tt_pred",
+        "tt_signed_diff",
+        "tt_abs_diff",
+        "tt_signed_pct_diff",
+        "tt_abs_pct_diff",
+        "mae_eval",
+        "rmse_eval",
+        "tt_real_q25",
+        "tt_real_median",
+        "tt_real_q75",
+        "status",
+        "seed_steps",
+        "timesteps_total",
+        "timesteps_eval",
+        "nodes",
+    ]
+
+    cols = [c for c in preferred_cols if c in peaks_df.columns]
+    remaining_cols = [c for c in peaks_df.columns if c not in cols]
+
+    return peaks_df[cols + remaining_cols].reset_index(drop=True)
+
+
+def plot_tt_histogram(
+    batch_dir: Path,
+    values,
+    selected_peaks_df: pd.DataFrame | None = None,
+    metric_name: str = "tt_real",
+    bins: int = 40,
+) -> dict:
+    """
+    Tworzy histogram TT jako PNG i opcjonalnie zaznacza 3 wybrane przypadki.
+    """
+    s = _clean_numeric(values)
+
+    out_path = batch_dir / f"{metric_name}_histogram.png"
+
+    out = {
+        "metric": metric_name,
+        "n": int(s.count()),
+        "bins_requested": int(bins),
+        "png": str(out_path),
+    }
+
+    if s.empty:
+        return out
+
+    effective_bins = min(int(bins), max(1, int(s.nunique())))
+    out["bins_effective"] = int(effective_bins)
+
+    plt.figure(figsize=(8, 5))
+
+    plt.hist(
+        s.to_numpy(dtype=float),
+        bins=effective_bins,
+        alpha=0.75,
+    )
+
+    plt.title("Histogram real TT")
+    plt.xlabel("Real TT")
+    plt.ylabel("Liczba plików")
+    plt.grid(True)
+
+    if selected_peaks_df is not None and not selected_peaks_df.empty:
+        for _, row in selected_peaks_df.iterrows():
+            if "tt_real" not in row.index:
+                continue
+
+            value = row.get("tt_real", np.nan)
+
+            try:
+                value = float(value)
+            except Exception:
+                continue
+
+            if not np.isfinite(value):
+                continue
+
+            label = str(row.get("peak_label", "selected_tt"))
+            file_name = str(row.get("file_name", ""))
+            short_name = safe_stem(file_name)[:28] if file_name else ""
+
+            plt.axvline(
+                value,
+                linestyle="--",
+                linewidth=1.2,
+                label=f"{label}: {value:.4g} {short_name}",
+            )
+
+        plt.legend(fontsize=8)
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=240)
+    plt.close()
 
     return out
 
@@ -782,6 +979,42 @@ def save_tt_report(
         metric_name="tt_real",
         bins=hist_bins,
     )
+
+    # --------------------------------------------------------
+    # Histogram real TT jako PNG + 3 reprezentatywne przypadki
+    # --------------------------------------------------------
+    selected_peaks_df = select_representative_tt_peaks(ok_df)
+
+    if not selected_peaks_df.empty:
+        selected_peaks_df.to_csv(
+            report_dir / "tt_selected_peaks.csv",
+            index=False,
+        )
+
+        # Kopia w katalogu batcha, obok najważniejszych plików.
+        selected_peaks_df.to_csv(
+            batch_dir / "tt_selected_peaks.csv",
+            index=False,
+        )
+
+        with open(report_dir / "tt_selected_peaks.json", "w", encoding="utf-8") as f:
+            json.dump(
+                selected_peaks_df.to_dict(orient="records"),
+                f,
+                indent=2,
+                ensure_ascii=False,
+                default=str,
+            )
+
+    hist_plot_info = plot_tt_histogram(
+        batch_dir=report_dir,
+        values=ok_df["tt_real"],
+        selected_peaks_df=selected_peaks_df,
+        metric_name="tt_real",
+        bins=hist_bins,
+    )
+
+    hist_info.update(hist_plot_info)
 
     # --------------------------------------------------------
     # Regresja predicted TT ~ real TT
@@ -1029,6 +1262,11 @@ def save_tt_report(
         "report_dir": str(report_dir),
         "tt_real_descriptive_stats": tt_real_stats,
         "tt_real_histogram": hist_info,
+        "tt_selected_peaks": (
+            selected_peaks_df.to_dict(orient="records")
+            if "selected_peaks_df" in locals() and not selected_peaks_df.empty
+            else []
+        ),
         "prediction_stats": prediction_stats,
         "regression_stats": regression,
     }
@@ -1701,6 +1939,12 @@ def main():
     print("  - real_tt_vs_predicted_tt.png", flush=True)
     print("  - real_tt_vs_predicted_tt_regression.png", flush=True)
     print("Raport TT: tt_report/", flush=True)
+    print("Histogram TT:", flush=True)
+    print("  - tt_report/tt_real_histogram.png", flush=True)
+    print("Wybrane przypadki TT:", flush=True)
+    print("  - tt_selected_peaks.csv", flush=True)
+    print("  - tt_report/tt_selected_peaks.csv", flush=True)
+    print("  - tt_report/tt_selected_peaks.json", flush=True)
 
 
 if __name__ == "__main__":
