@@ -1402,8 +1402,8 @@ def build_parser():
     p.add_argument(
         "--sequence_model",
         type=str,
-        default="lstm_concat",
-        choices=["lstm_concat", "gru", "attention"],
+        default="lstm",
+        choices=["lstm", "gru", "attention"],
     )
 
     p.add_argument(
