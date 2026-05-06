@@ -10,7 +10,7 @@ from model import (
     AttentionRepresentation,
     fuse,
 )
-from model import STAEformerBackbone
+from model import STAEformerBackbone, AGCRNBackbone
 
 class ADTTP(nn.Module):
     """
@@ -45,7 +45,7 @@ class ADTTP(nn.Module):
         fused_dim: int = 64,
         mlp_hidden_dim: int = 64,
         target_dim: int = 1,
-        sequence_model: str = "lstm",      # "lstm" / "gru" / "attention"
+        sequence_model: str = "lstm_concat",      # "lstm_concat" / "gru" / "attention"
         fuse_method: str = "Attention",    # "concatenate" / "Hadamard" / "Attention"
         dropout: float = 0.1,
         device: str = "cuda",
@@ -55,6 +55,7 @@ class ADTTP(nn.Module):
         q_backbone: str = "gwnet",  # "gwnet" albo "staeformer"
         q_len: int | None = None,
         staeformer_kwargs: dict | None = None,
+        agcrn_kwargs: dict | None = None,
         q_node_pooling: str = "mean",
         default_use_gate=True,
         default_hard_gate=False,
@@ -132,6 +133,19 @@ class ADTTP(nn.Module):
 
             self.q_backbone_dim = self.q_encoder.out_channels
 
+        elif self.q_backbone in {"agcrn", "adaptive_gcrn"}:
+            agcrn_kwargs = dict(agcrn_kwargs or {})
+
+            self.q_encoder = AGCRNBackbone(
+                num_nodes=num_nodes,
+                input_dim=1,
+                dropout=dropout,
+                node_pooling=q_node_pooling,
+                **agcrn_kwargs,
+            )
+
+            self.q_backbone_dim = self.q_encoder.out_channels
+
         else:
             raise ValueError(f"Unknown q_backbone: {q_backbone}")
 
@@ -142,7 +156,7 @@ class ADTTP(nn.Module):
         )
 
         # a encoder
-        if self.sequence_model == "lstm":
+        if self.sequence_model == "lstm_concat":
             self.a_encoder = LSTM_Representation(
                 n_nodes=num_nodes,
                 embedding_size=a_embedding_size,
@@ -288,7 +302,7 @@ class ADTTP(nn.Module):
         """
         supports = self._resolve_supports(supports)
 
-        if self.sequence_model == "lstm":
+        if self.sequence_model == "lstm_concat":
             a_repr = self.a_encoder(
                 a_seq=a,
                 supports=supports,
