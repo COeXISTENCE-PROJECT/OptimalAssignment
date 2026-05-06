@@ -386,6 +386,18 @@ def compute_one_file_metrics(
     tt_signed_diff = float(tt_pred - tt_real)
     tt_abs_diff = float(abs(tt_signed_diff))
 
+    tt_signed_pct_diff = (
+        float(100.0 * tt_signed_diff / tt_real)
+        if tt_real != 0
+        else np.nan
+    )
+
+    tt_abs_pct_diff = (
+        float(abs(tt_signed_pct_diff))
+        if np.isfinite(tt_signed_pct_diff)
+        else np.nan
+    )
+
     row = {
         "selected_index": int(selected_index),
         "file_name": file_name,
@@ -404,6 +416,8 @@ def compute_one_file_metrics(
         "tt_pred": tt_pred,
         "tt_signed_diff": tt_signed_diff,
         "tt_abs_diff": tt_abs_diff,
+        "tt_signed_pct_diff": tt_signed_pct_diff,
+        "tt_abs_pct_diff": tt_abs_pct_diff,
     }
 
     details = {
@@ -785,56 +799,136 @@ def save_tt_report(
     # --------------------------------------------------------
     # Statystyki predykcji
     # --------------------------------------------------------
+    # --------------------------------------------------------
+    # Statystyki predykcji per file
+    # --------------------------------------------------------
+
+    # Jeśli uruchamiasz raport na starszym per_file_metrics.csv,
+    # gdzie nie było jeszcze tych kolumn, policz je tutaj.
+    if "tt_signed_pct_diff" not in ok_df.columns:
+        ok_df["tt_signed_pct_diff"] = np.where(
+            ok_df["tt_real"] != 0,
+            100.0 * ok_df["tt_signed_diff"] / ok_df["tt_real"],
+            np.nan,
+        )
+
+    if "tt_abs_pct_diff" not in ok_df.columns:
+        ok_df["tt_abs_pct_diff"] = np.abs(ok_df["tt_signed_pct_diff"])
+
+    for col in [
+        "tt_signed_pct_diff",
+        "tt_abs_pct_diff",
+    ]:
+        ok_df[col] = pd.to_numeric(ok_df[col], errors="coerce")
+
+    def _series_stats(prefix: str, values) -> dict:
+        s = _clean_numeric(values)
+
+        out = {
+            f"{prefix}_count": int(s.count()),
+            f"{prefix}_mean": np.nan,
+            f"{prefix}_sd": np.nan,
+            f"{prefix}_median": np.nan,
+            f"{prefix}_q25": np.nan,
+            f"{prefix}_q75": np.nan,
+            f"{prefix}_min": np.nan,
+            f"{prefix}_max": np.nan,
+        }
+
+        if s.empty:
+            return out
+
+        q = s.quantile([0.25, 0.50, 0.75])
+
+        out.update({
+            f"{prefix}_mean": _json_float(s.mean()),
+            f"{prefix}_sd": _json_float(s.std(ddof=1)) if s.count() > 1 else np.nan,
+            f"{prefix}_median": _json_float(q.loc[0.50]),
+            f"{prefix}_q25": _json_float(q.loc[0.25]),
+            f"{prefix}_q75": _json_float(q.loc[0.75]),
+            f"{prefix}_min": _json_float(s.min()),
+            f"{prefix}_max": _json_float(s.max()),
+        })
+
+        return out
+
     tt_real_q25 = float(ok_df["tt_real"].quantile(0.25))
     tt_real_q75 = float(ok_df["tt_real"].quantile(0.75))
 
-    tt_pred_q25 = float(ok_df["tt_pred"].quantile(0.25))
-    tt_pred_q75 = float(ok_df["tt_pred"].quantile(0.75))
-
-    low_real_tt_df = ok_df[ok_df["tt_real"] <= tt_real_q25]
-    high_real_tt_df = ok_df[ok_df["tt_real"] >= tt_real_q75]
+    low_real_tt_df = ok_df[ok_df["tt_real"] <= tt_real_q25].copy()
+    high_real_tt_df = ok_df[ok_df["tt_real"] >= tt_real_q75].copy()
 
     prediction_stats = {
         "n_files": int(len(ok_df)),
 
-        "tt_real_total": _json_float(ok_df["tt_real"].sum()),
-        "tt_pred_total": _json_float(ok_df["tt_pred"].sum()),
+        "definition_signed_pct_diff": "100 * (tt_pred - tt_real) / tt_real",
+        "definition_abs_pct_diff": "abs(100 * (tt_pred - tt_real) / tt_real)",
 
-        "tt_signed_diff_total": _json_float(
-            ok_df["tt_pred"].sum() - ok_df["tt_real"].sum()
-        ),
-        "tt_abs_diff_total": _json_float(
-            abs(ok_df["tt_pred"].sum() - ok_df["tt_real"].sum())
-        ),
+        "tt_real_q25_threshold": _json_float(tt_real_q25),
+        "tt_real_q75_threshold": _json_float(tt_real_q75),
 
-        "tt_signed_diff_mean_per_file": _json_float(ok_df["tt_signed_diff"].mean()),
-        "tt_abs_diff_mean_per_file": _json_float(ok_df["tt_abs_diff"].mean()),
-
-        "tt_signed_diff_median_per_file": _json_float(ok_df["tt_signed_diff"].median()),
-        "tt_abs_diff_median_per_file": _json_float(ok_df["tt_abs_diff"].median()),
-
-        "tt_real_q25": _json_float(tt_real_q25),
-        "tt_pred_q25": _json_float(tt_pred_q25),
-        "tt_pred_minus_real_q25": _json_float(tt_pred_q25 - tt_real_q25),
-
-        "tt_real_q75": _json_float(tt_real_q75),
-        "tt_pred_q75": _json_float(tt_pred_q75),
-        "tt_pred_minus_real_q75": _json_float(tt_pred_q75 - tt_real_q75),
-
-        "low_quartile_mean_signed_diff_per_file": _json_float(
-            low_real_tt_df["tt_signed_diff"].mean()
-        ),
-        "low_quartile_mean_abs_diff_per_file": _json_float(
-            low_real_tt_df["tt_abs_diff"].mean()
-        ),
-
-        "high_quartile_mean_signed_diff_per_file": _json_float(
-            high_real_tt_df["tt_signed_diff"].mean()
-        ),
-        "high_quartile_mean_abs_diff_per_file": _json_float(
-            high_real_tt_df["tt_abs_diff"].mean()
-        ),
+        "low_quartile_n_files": int(len(low_real_tt_df)),
+        "high_quartile_n_files": int(len(high_real_tt_df)),
     }
+
+    # Globalnie po plikach, bez sumowania TT po całym zbiorze.
+    prediction_stats.update(
+        _series_stats(
+            "tt_signed_diff_per_file",
+            ok_df["tt_signed_diff"],
+        )
+    )
+
+    prediction_stats.update(
+        _series_stats(
+            "tt_abs_diff_per_file",
+            ok_df["tt_abs_diff"],
+        )
+    )
+
+    prediction_stats.update(
+        _series_stats(
+            "tt_signed_pct_diff_per_file",
+            ok_df["tt_signed_pct_diff"],
+        )
+    )
+
+    prediction_stats.update(
+        _series_stats(
+            "tt_abs_pct_diff_per_file",
+            ok_df["tt_abs_pct_diff"],
+        )
+    )
+
+    # Dolny kwartyl real TT.
+    prediction_stats.update(
+        _series_stats(
+            "low_quartile_signed_pct_diff_per_file",
+            low_real_tt_df["tt_signed_pct_diff"],
+        )
+    )
+
+    prediction_stats.update(
+        _series_stats(
+            "low_quartile_abs_pct_diff_per_file",
+            low_real_tt_df["tt_abs_pct_diff"],
+        )
+    )
+
+    # Górny kwartyl real TT.
+    prediction_stats.update(
+        _series_stats(
+            "high_quartile_signed_pct_diff_per_file",
+            high_real_tt_df["tt_signed_pct_diff"],
+        )
+    )
+
+    prediction_stats.update(
+        _series_stats(
+            "high_quartile_abs_pct_diff_per_file",
+            high_real_tt_df["tt_abs_pct_diff"],
+        )
+    )
 
     pd.DataFrame([prediction_stats]).to_csv(
         report_dir / "tt_prediction_stats.csv",
@@ -848,29 +942,80 @@ def save_tt_report(
         row = {
             "group": group_name,
             "n_files": int(len(subset)),
+
+            "tt_real_min": np.nan,
             "tt_real_mean": np.nan,
+            "tt_real_median": np.nan,
+            "tt_real_max": np.nan,
+
             "tt_pred_mean": np.nan,
+            "tt_pred_median": np.nan,
+
             "tt_signed_diff_mean_per_file": np.nan,
-            "tt_abs_diff_mean_per_file": np.nan,
             "tt_signed_diff_median_per_file": np.nan,
+            "tt_abs_diff_mean_per_file": np.nan,
             "tt_abs_diff_median_per_file": np.nan,
+
+            "tt_signed_pct_diff_mean_per_file": np.nan,
+            "tt_signed_pct_diff_sd_per_file": np.nan,
+            "tt_signed_pct_diff_median_per_file": np.nan,
+            "tt_signed_pct_diff_q25_per_file": np.nan,
+            "tt_signed_pct_diff_q75_per_file": np.nan,
+
+            "tt_abs_pct_diff_mean_per_file": np.nan,
+            "tt_abs_pct_diff_sd_per_file": np.nan,
+            "tt_abs_pct_diff_median_per_file": np.nan,
+            "tt_abs_pct_diff_q25_per_file": np.nan,
+            "tt_abs_pct_diff_q75_per_file": np.nan,
         }
 
         if subset.empty:
             return row
 
+        signed_pct = _clean_numeric(subset["tt_signed_pct_diff"])
+        abs_pct = _clean_numeric(subset["tt_abs_pct_diff"])
+
+        signed_pct_q = signed_pct.quantile([0.25, 0.50, 0.75]) if not signed_pct.empty else None
+        abs_pct_q = abs_pct.quantile([0.25, 0.50, 0.75]) if not abs_pct.empty else None
+
         row.update({
+            "tt_real_min": _json_float(subset["tt_real"].min()),
             "tt_real_mean": _json_float(subset["tt_real"].mean()),
+            "tt_real_median": _json_float(subset["tt_real"].median()),
+            "tt_real_max": _json_float(subset["tt_real"].max()),
+
             "tt_pred_mean": _json_float(subset["tt_pred"].mean()),
+            "tt_pred_median": _json_float(subset["tt_pred"].median()),
+
             "tt_signed_diff_mean_per_file": _json_float(subset["tt_signed_diff"].mean()),
-            "tt_abs_diff_mean_per_file": _json_float(subset["tt_abs_diff"].mean()),
             "tt_signed_diff_median_per_file": _json_float(subset["tt_signed_diff"].median()),
+            "tt_abs_diff_mean_per_file": _json_float(subset["tt_abs_diff"].mean()),
             "tt_abs_diff_median_per_file": _json_float(subset["tt_abs_diff"].median()),
         })
+
+        if signed_pct_q is not None:
+            row.update({
+                "tt_signed_pct_diff_mean_per_file": _json_float(signed_pct.mean()),
+                "tt_signed_pct_diff_sd_per_file": _json_float(
+                    signed_pct.std(ddof=1)) if signed_pct.count() > 1 else np.nan,
+                "tt_signed_pct_diff_median_per_file": _json_float(signed_pct_q.loc[0.50]),
+                "tt_signed_pct_diff_q25_per_file": _json_float(signed_pct_q.loc[0.25]),
+                "tt_signed_pct_diff_q75_per_file": _json_float(signed_pct_q.loc[0.75]),
+            })
+
+        if abs_pct_q is not None:
+            row.update({
+                "tt_abs_pct_diff_mean_per_file": _json_float(abs_pct.mean()),
+                "tt_abs_pct_diff_sd_per_file": _json_float(abs_pct.std(ddof=1)) if abs_pct.count() > 1 else np.nan,
+                "tt_abs_pct_diff_median_per_file": _json_float(abs_pct_q.loc[0.50]),
+                "tt_abs_pct_diff_q25_per_file": _json_float(abs_pct_q.loc[0.25]),
+                "tt_abs_pct_diff_q75_per_file": _json_float(abs_pct_q.loc[0.75]),
+            })
 
         return row
 
     prediction_groups = pd.DataFrame([
+        _prediction_group_stats("all_files", ok_df),
         _prediction_group_stats("lowest_25pct_by_real_tt", low_real_tt_df),
         _prediction_group_stats("highest_25pct_by_real_tt", high_real_tt_df),
     ])
@@ -1118,6 +1263,7 @@ def process_items_batch(
             f"TT real={row['tt_real']:.6f}, "
             f"TT pred={row['tt_pred']:.6f}, "
             f"diff={row['tt_signed_diff']:.6f}, "
+            f"pct diff={row['tt_signed_pct_diff']:.3f}%, "
             f"MAE={row['mae_eval']:.6f}",
             flush=True,
         )
@@ -1256,8 +1402,8 @@ def build_parser():
     p.add_argument(
         "--sequence_model",
         type=str,
-        default="lstm",
-        choices=["lstm", "gru", "attention"],
+        default="lstm_concat",
+        choices=["lstm_concat", "gru", "attention"],
     )
 
     p.add_argument(
@@ -1463,10 +1609,6 @@ def main():
             else np.nan
         ),
 
-        "tt_real_total": float(agg.total_tt_real),
-        "tt_pred_total": float(agg.total_tt_pred),
-        "tt_signed_diff_total": tt_signed_diff_total,
-        "tt_abs_diff_total": tt_abs_diff_total,
 
         "tt_abs_diff_mean_per_file": (
             float(agg.total_tt_abs_diff_filewise / agg.files_ok)
@@ -1516,13 +1658,25 @@ def main():
         regression_stats = tt_report_summary.get("regression_stats", {})
 
         for key in [
-            "tt_signed_diff_mean_per_file",
-            "tt_abs_diff_mean_per_file",
-            "tt_pred_minus_real_q25",
-            "tt_pred_minus_real_q75",
-            "low_quartile_mean_signed_diff_per_file",
-            "high_quartile_mean_signed_diff_per_file",
+            "tt_signed_pct_diff_per_file_mean",
+            "tt_signed_pct_diff_per_file_sd",
+            "tt_signed_pct_diff_per_file_median",
+            "tt_abs_pct_diff_per_file_mean",
+            "tt_abs_pct_diff_per_file_sd",
+            "tt_abs_pct_diff_per_file_median",
+
+            "low_quartile_signed_pct_diff_per_file_mean",
+            "low_quartile_signed_pct_diff_per_file_median",
+            "low_quartile_abs_pct_diff_per_file_mean",
+            "low_quartile_abs_pct_diff_per_file_median",
+
+            "high_quartile_signed_pct_diff_per_file_mean",
+            "high_quartile_signed_pct_diff_per_file_median",
+            "high_quartile_abs_pct_diff_per_file_mean",
+            "high_quartile_abs_pct_diff_per_file_median",
         ]:
+            if key in prediction_stats:
+                summary[f"tt_prediction_{key}"] = prediction_stats[key]
             if key in prediction_stats:
                 summary[f"tt_prediction_{key}"] = prediction_stats[key]
 
