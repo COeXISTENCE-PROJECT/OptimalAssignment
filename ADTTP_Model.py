@@ -45,7 +45,7 @@ class ADTTP(nn.Module):
         fused_dim: int = 64,
         mlp_hidden_dim: int = 64,
         target_dim: int = 1,
-        sequence_model: str = "lstm_concat",      # "lstm_concat" / "gru" / "attention"
+        sequence_model: str = "lstm",      # "lstm_concat" / "gru" / "attention"
         fuse_method: str = "Attention",    # "concatenate" / "Hadamard" / "Attention"
         dropout: float = 0.1,
         device: str = "cuda",
@@ -156,7 +156,7 @@ class ADTTP(nn.Module):
         )
 
         # a encoder
-        if self.sequence_model == "lstm_concat":
+        if self.sequence_model == "lstm":
             self.a_encoder = LSTM_Representation(
                 n_nodes=num_nodes,
                 embedding_size=a_embedding_size,
@@ -302,7 +302,7 @@ class ADTTP(nn.Module):
         """
         supports = self._resolve_supports(supports)
 
-        if self.sequence_model == "lstm_concat":
+        if self.sequence_model == "lstm":
             a_repr = self.a_encoder(
                 a_seq=a,
                 supports=supports,
