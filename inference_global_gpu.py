@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 import torch
 
+import scienceplots
 
 # ============================================================
 # Import z istniejącego inference.py
@@ -47,6 +48,51 @@ from inference import (
 # ============================================================
 # Helpery wyboru plików
 # ============================================================
+
+try:
+    import scienceplots  # noqa: F401  # rejestruje style `science` w matplotlib
+    SCIENCEPLOTS_AVAILABLE = True
+except Exception:
+    scienceplots = None
+    SCIENCEPLOTS_AVAILABLE = False
+
+
+def configure_plot_style(style_names: list[str] | None = None) -> None:
+    """
+    Konfiguruje globalny styl wykresów.
+
+    Domyślnie używa SciencePlots z wyłączonym LaTeX-em, bo etykiety
+    zawierają polskie znaki i symbole Unicode.
+    """
+    if style_names is None or len(style_names) == 0:
+        style_names = ["science", "no-latex"]
+
+    if SCIENCEPLOTS_AVAILABLE:
+        try:
+            plt.style.use(style_names)
+            print(f"Plot style: SciencePlots {style_names}", flush=True)
+        except Exception as e:
+            print(
+                f"[WARN] Nie udało się ustawić stylu SciencePlots {style_names}: {repr(e)}. "
+                "Używam domyślnego stylu matplotlib.",
+                flush=True,
+            )
+    else:
+        print(
+            "[WARN] Pakiet scienceplots nie jest zainstalowany. "
+            "Zainstaluj: pip install SciencePlots. Używam domyślnego stylu matplotlib.",
+            flush=True,
+        )
+
+    plt.rcParams.update({
+        "figure.dpi": 120,
+        "savefig.dpi": 240,
+        "axes.grid": True,
+        "grid.alpha": 0.35,
+        "legend.frameon": True,
+        "axes.unicode_minus": False,
+    })
+
 
 def safe_stem(file_name: str) -> str:
     stem = Path(file_name).stem
@@ -699,19 +745,342 @@ def save_per_node_metrics(batch_dir: Path, agg: AggregateState):
 
     pd.DataFrame(group_rows).to_csv(batch_dir / "node_groups_aggregate.csv", index=False)
 
-def save_detailed_tt_descriptive_stats(batch_dir: Path, per_file_df: pd.DataFrame):
+def _json_float(value):
+    """Bezpieczna konwersja numpy scalar / NaN / inf do wartości JSON-friendly."""
+    try:
+        value = float(value)
+    except Exception:
+        return np.nan
+    return value if np.isfinite(value) else np.nan
+
+
+def _save_histogram_with_bins(
+    out_dir: Path,
+    metric: str,
+    values: pd.Series,
+    bins: int,
+    title: str,
+    xlabel: str,
+):
+    """Zapisuje histogram PNG oraz tabelę koszyków CSV."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    s = (
+        pd.to_numeric(values, errors="coerce")
+        .replace([np.inf, -np.inf], np.nan)
+        .dropna()
+    )
+
+    if s.empty:
+        return
+
+    effective_bins = min(int(bins), max(1, int(s.nunique())))
+    effective_bins = max(effective_bins, 1)
+
+    counts, edges = np.histogram(s.to_numpy(dtype=float), bins=effective_bins)
+
+    hist_df = pd.DataFrame({
+        "bin_left": edges[:-1],
+        "bin_right": edges[1:],
+        "count": counts,
+    })
+
+    hist_df["density"] = (
+        hist_df["count"] / hist_df["count"].sum()
+        if hist_df["count"].sum()
+        else 0.0
+    )
+
+    hist_df.to_csv(out_dir / f"{metric}_histogram_bins.csv", index=False)
+
+    q25, q50, q75 = s.quantile([0.25, 0.50, 0.75])
+    mean = s.mean()
+
+    plt.figure(figsize=(9, 5.5))
+    plt.hist(s.to_numpy(dtype=float), bins=effective_bins, alpha=0.85)
+    plt.axvline(mean, linestyle="-", linewidth=1.2, label=f"mean = {mean:.4g}")
+    plt.axvline(q50, linestyle="--", linewidth=1.2, label=f"median = {q50:.4g}")
+    plt.axvline(q25, linestyle=":", linewidth=1.2, label=f"Q1 = {q25:.4g}")
+    plt.axvline(q75, linestyle=":", linewidth=1.2, label=f"Q3 = {q75:.4g}")
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.ylabel("liczba plików")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_dir / f"{metric}_histogram.png", dpi=240)
+    plt.close()
+
+
+def _quartile_error_summary(
+    group_name: str,
+    subset: pd.DataFrame,
+    tt_q25: float,
+    tt_q75: float,
+) -> dict:
+    """Błąd modelu dla dolnego albo górnego kwartylu real TT."""
+    row = {
+        "quartile_group": group_name,
+        "tt_real_q25_threshold_global": _json_float(tt_q25),
+        "tt_real_q75_threshold_global": _json_float(tt_q75),
+        "n_files": int(len(subset)),
+    }
+
+    if subset.empty:
+        keys = [
+            "tt_real_min",
+            "tt_real_mean",
+            "tt_real_median",
+            "tt_real_max",
+            "tt_pred_mean",
+            "tt_pred_median",
+            "tt_signed_diff_mean",
+            "tt_signed_diff_median",
+            "tt_abs_diff_mean",
+            "tt_abs_diff_median",
+            "tt_rel_diff_mean",
+            "tt_rel_diff_median",
+            "tt_rel_diff_percent_mean",
+            "tt_rel_diff_percent_median",
+            "mae_eval_mean",
+            "rmse_eval_mean",
+            "tt_real_total",
+            "tt_pred_total",
+            "tt_signed_diff_total",
+            "tt_abs_diff_total",
+            "tt_rel_diff_total",
+            "underprediction_fraction",
+            "overprediction_fraction",
+        ]
+
+        for key in keys:
+            row[key] = np.nan
+
+        return row
+
+    tt_real_total = float(subset["tt_real"].sum())
+    tt_pred_total = float(subset["tt_pred"].sum())
+    signed_total = tt_pred_total - tt_real_total
+    abs_total = abs(signed_total)
+
+    row.update({
+        "tt_real_min": _json_float(subset["tt_real"].min()),
+        "tt_real_mean": _json_float(subset["tt_real"].mean()),
+        "tt_real_median": _json_float(subset["tt_real"].median()),
+        "tt_real_max": _json_float(subset["tt_real"].max()),
+
+        "tt_pred_mean": _json_float(subset["tt_pred"].mean()),
+        "tt_pred_median": _json_float(subset["tt_pred"].median()),
+
+        "tt_signed_diff_mean": _json_float(subset["tt_signed_diff"].mean()),
+        "tt_signed_diff_median": _json_float(subset["tt_signed_diff"].median()),
+
+        "tt_abs_diff_mean": _json_float(subset["tt_abs_diff"].mean()),
+        "tt_abs_diff_median": _json_float(subset["tt_abs_diff"].median()),
+
+        "tt_rel_diff_mean": _json_float(subset["tt_rel_diff"].mean()),
+        "tt_rel_diff_median": _json_float(subset["tt_rel_diff"].median()),
+        "tt_rel_diff_percent_mean": _json_float(100.0 * subset["tt_rel_diff"].mean()),
+        "tt_rel_diff_percent_median": _json_float(100.0 * subset["tt_rel_diff"].median()),
+
+        "mae_eval_mean": _json_float(subset["mae_eval"].mean()) if "mae_eval" in subset.columns else np.nan,
+        "rmse_eval_mean": _json_float(subset["rmse_eval"].mean()) if "rmse_eval" in subset.columns else np.nan,
+
+        "tt_real_total": _json_float(tt_real_total),
+        "tt_pred_total": _json_float(tt_pred_total),
+        "tt_signed_diff_total": _json_float(signed_total),
+        "tt_abs_diff_total": _json_float(abs_total),
+        "tt_rel_diff_total": _json_float(abs_total / tt_real_total) if tt_real_total != 0 else np.nan,
+
+        "underprediction_fraction": _json_float((subset["tt_signed_diff"] < 0).mean()),
+        "overprediction_fraction": _json_float((subset["tt_signed_diff"] > 0).mean()),
+    })
+
+    return row
+
+
+def _json_float(value):
+    """Bezpieczna konwersja numpy scalar / NaN / inf do wartości JSON-friendly."""
+    try:
+        value = float(value)
+    except Exception:
+        return np.nan
+    return value if np.isfinite(value) else np.nan
+
+
+def _save_histogram_with_bins(
+    out_dir: Path,
+    metric: str,
+    values: pd.Series,
+    bins: int,
+    title: str,
+    xlabel: str,
+):
+    """Zapisuje histogram PNG oraz tabelę koszyków CSV."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    s = (
+        pd.to_numeric(values, errors="coerce")
+        .replace([np.inf, -np.inf], np.nan)
+        .dropna()
+    )
+
+    if s.empty:
+        return
+
+    effective_bins = min(int(bins), max(1, int(s.nunique())))
+    effective_bins = max(effective_bins, 1)
+
+    counts, edges = np.histogram(s.to_numpy(dtype=float), bins=effective_bins)
+
+    hist_df = pd.DataFrame({
+        "bin_left": edges[:-1],
+        "bin_right": edges[1:],
+        "count": counts,
+    })
+
+    hist_df["density"] = (
+        hist_df["count"] / hist_df["count"].sum()
+        if hist_df["count"].sum()
+        else 0.0
+    )
+
+    hist_df.to_csv(out_dir / f"{metric}_histogram_bins.csv", index=False)
+
+    q25, q50, q75 = s.quantile([0.25, 0.50, 0.75])
+    mean = s.mean()
+
+    plt.figure(figsize=(9, 5.5))
+    plt.hist(s.to_numpy(dtype=float), bins=effective_bins, alpha=0.85)
+    plt.axvline(mean, linestyle="-", linewidth=1.2, label=f"mean = {mean:.4g}")
+    plt.axvline(q50, linestyle="--", linewidth=1.2, label=f"median = {q50:.4g}")
+    plt.axvline(q25, linestyle=":", linewidth=1.2, label=f"Q1 = {q25:.4g}")
+    plt.axvline(q75, linestyle=":", linewidth=1.2, label=f"Q3 = {q75:.4g}")
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.ylabel("liczba plików")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_dir / f"{metric}_histogram.png", dpi=240)
+    plt.close()
+
+
+def _quartile_error_summary(
+    group_name: str,
+    subset: pd.DataFrame,
+    tt_q25: float,
+    tt_q75: float,
+) -> dict:
+    """Błąd modelu dla dolnego albo górnego kwartylu real TT."""
+    row = {
+        "quartile_group": group_name,
+        "tt_real_q25_threshold_global": _json_float(tt_q25),
+        "tt_real_q75_threshold_global": _json_float(tt_q75),
+        "n_files": int(len(subset)),
+    }
+
+    if subset.empty:
+        keys = [
+            "tt_real_min",
+            "tt_real_mean",
+            "tt_real_median",
+            "tt_real_max",
+            "tt_pred_mean",
+            "tt_pred_median",
+            "tt_signed_diff_mean",
+            "tt_signed_diff_median",
+            "tt_abs_diff_mean",
+            "tt_abs_diff_median",
+            "tt_rel_diff_mean",
+            "tt_rel_diff_median",
+            "tt_rel_diff_percent_mean",
+            "tt_rel_diff_percent_median",
+            "mae_eval_mean",
+            "rmse_eval_mean",
+            "tt_real_total",
+            "tt_pred_total",
+            "tt_signed_diff_total",
+            "tt_abs_diff_total",
+            "tt_rel_diff_total",
+            "underprediction_fraction",
+            "overprediction_fraction",
+        ]
+
+        for key in keys:
+            row[key] = np.nan
+
+        return row
+
+    tt_real_total = float(subset["tt_real"].sum())
+    tt_pred_total = float(subset["tt_pred"].sum())
+    signed_total = tt_pred_total - tt_real_total
+    abs_total = abs(signed_total)
+
+    row.update({
+        "tt_real_min": _json_float(subset["tt_real"].min()),
+        "tt_real_mean": _json_float(subset["tt_real"].mean()),
+        "tt_real_median": _json_float(subset["tt_real"].median()),
+        "tt_real_max": _json_float(subset["tt_real"].max()),
+
+        "tt_pred_mean": _json_float(subset["tt_pred"].mean()),
+        "tt_pred_median": _json_float(subset["tt_pred"].median()),
+
+        "tt_signed_diff_mean": _json_float(subset["tt_signed_diff"].mean()),
+        "tt_signed_diff_median": _json_float(subset["tt_signed_diff"].median()),
+
+        "tt_abs_diff_mean": _json_float(subset["tt_abs_diff"].mean()),
+        "tt_abs_diff_median": _json_float(subset["tt_abs_diff"].median()),
+
+        "tt_rel_diff_mean": _json_float(subset["tt_rel_diff"].mean()),
+        "tt_rel_diff_median": _json_float(subset["tt_rel_diff"].median()),
+        "tt_rel_diff_percent_mean": _json_float(100.0 * subset["tt_rel_diff"].mean()),
+        "tt_rel_diff_percent_median": _json_float(100.0 * subset["tt_rel_diff"].median()),
+
+        "mae_eval_mean": _json_float(subset["mae_eval"].mean()) if "mae_eval" in subset.columns else np.nan,
+        "rmse_eval_mean": _json_float(subset["rmse_eval"].mean()) if "rmse_eval" in subset.columns else np.nan,
+
+        "tt_real_total": _json_float(tt_real_total),
+        "tt_pred_total": _json_float(tt_pred_total),
+        "tt_signed_diff_total": _json_float(signed_total),
+        "tt_abs_diff_total": _json_float(abs_total),
+        "tt_rel_diff_total": _json_float(abs_total / tt_real_total) if tt_real_total != 0 else np.nan,
+
+        "underprediction_fraction": _json_float((subset["tt_signed_diff"] < 0).mean()),
+        "overprediction_fraction": _json_float((subset["tt_signed_diff"] > 0).mean()),
+    })
+
+    return row
+
+
+def save_detailed_tt_descriptive_stats(
+    batch_dir: Path,
+    per_file_df: pd.DataFrame,
+    hist_bins: int = 40,
+    top_n: int = 10,
+) -> dict:
     """
-    Zapisuje szczegółowe statystyki opisowe dla TT i błędów.
-    Działa na wierszach status == OK.
+    Zapisuje:
+      - statystyki opisowe TT,
+      - odchylenia, wariancje, kwantyle,
+      - histogramy,
+      - błąd modelu w dolnym i górnym kwartylu TT_real,
+      - nazwy plików z najniższym i najwyższym TT.
     """
 
     ok_df = per_file_df[per_file_df["status"] == "OK"].copy()
 
     if ok_df.empty:
         print("[WARN] Brak poprawnych plików do statystyk opisowych TT.")
-        return
+        return {}
 
-    # Dodatkowe kolumny pomocnicze
+    report_dir = batch_dir / "tt_descriptive_report"
+    hist_dir = report_dir / "histograms"
+
+    report_dir.mkdir(parents=True, exist_ok=True)
+    hist_dir.mkdir(parents=True, exist_ok=True)
+
+    # Kolumny pomocnicze.
     ok_df["tt_pred_over_real"] = np.where(
         ok_df["tt_real"] != 0,
         ok_df["tt_pred"] / ok_df["tt_real"],
@@ -743,100 +1112,197 @@ def save_detailed_tt_descriptive_stats(batch_dir: Path, per_file_df: pd.DataFram
 
     numeric_cols = [c for c in numeric_cols if c in ok_df.columns]
 
-    rows = []
+    # --------------------------------------------------------
+    # Statystyki opisowe + kwantyle
+    # --------------------------------------------------------
+    stat_rows = []
+    quantile_rows = []
 
-    percentiles = [0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99]
+    quantiles = [
+        0.00,
+        0.01,
+        0.05,
+        0.10,
+        0.25,
+        0.50,
+        0.75,
+        0.90,
+        0.95,
+        0.99,
+        1.00,
+    ]
 
     for col in numeric_cols:
-        s = pd.to_numeric(ok_df[col], errors="coerce").dropna()
+        s = (
+            pd.to_numeric(ok_df[col], errors="coerce")
+            .replace([np.inf, -np.inf], np.nan)
+            .dropna()
+        )
 
         if s.empty:
             continue
 
-        q = s.quantile(percentiles)
+        q = s.quantile(quantiles)
 
-        rows.append({
+        mean = s.mean()
+        std_sample = s.std(ddof=1) if s.count() > 1 else np.nan
+        std_population = s.std(ddof=0) if s.count() > 0 else np.nan
+        variance_sample = s.var(ddof=1) if s.count() > 1 else np.nan
+
+        stat_rows.append({
             "metric": col,
             "count": int(s.count()),
-            "mean": float(s.mean()),
-            "std": float(s.std(ddof=1)) if s.count() > 1 else np.nan,
-            "min": float(s.min()),
-            "p01": float(q.loc[0.01]),
-            "p05": float(q.loc[0.05]),
-            "p10": float(q.loc[0.10]),
-            "p25": float(q.loc[0.25]),
-            "median": float(q.loc[0.50]),
-            "p75": float(q.loc[0.75]),
-            "p90": float(q.loc[0.90]),
-            "p95": float(q.loc[0.95]),
-            "p99": float(q.loc[0.99]),
-            "max": float(s.max()),
-            "iqr": float(q.loc[0.75] - q.loc[0.25]),
-            "cv": float(s.std(ddof=1) / s.mean()) if s.count() > 1 and s.mean() != 0 else np.nan,
-            "skew": float(s.skew()) if s.count() > 2 else np.nan,
-            "kurtosis": float(s.kurtosis()) if s.count() > 3 else np.nan,
+            "missing": int(len(ok_df[col]) - s.count()),
+
+            "mean": _json_float(mean),
+            "std": _json_float(std_sample),
+            "std_sample": _json_float(std_sample),
+            "std_population": _json_float(std_population),
+            "variance_sample": _json_float(variance_sample),
+            "sem": _json_float(std_sample / math.sqrt(s.count())) if s.count() > 1 else np.nan,
+
+            "min": _json_float(q.loc[0.00]),
+            "p01": _json_float(q.loc[0.01]),
+            "p05": _json_float(q.loc[0.05]),
+            "p10": _json_float(q.loc[0.10]),
+            "p25": _json_float(q.loc[0.25]),
+            "median": _json_float(q.loc[0.50]),
+            "p75": _json_float(q.loc[0.75]),
+            "p90": _json_float(q.loc[0.90]),
+            "p95": _json_float(q.loc[0.95]),
+            "p99": _json_float(q.loc[0.99]),
+            "max": _json_float(q.loc[1.00]),
+
+            "range": _json_float(q.loc[1.00] - q.loc[0.00]),
+            "iqr": _json_float(q.loc[0.75] - q.loc[0.25]),
+            "mad_from_mean": _json_float(np.mean(np.abs(s - mean))),
+            "mad_from_median": _json_float(np.median(np.abs(s - s.median()))),
+
+            "cv": _json_float(std_sample / mean) if s.count() > 1 and mean != 0 else np.nan,
+            "skew": _json_float(s.skew()) if s.count() > 2 else np.nan,
+            "kurtosis": _json_float(s.kurtosis()) if s.count() > 3 else np.nan,
         })
 
-    stats_df = pd.DataFrame(rows)
-    stats_df.to_csv(batch_dir / "tt_descriptive_stats.csv", index=False)
+        for level, value in q.items():
+            quantile_rows.append({
+                "metric": col,
+                "quantile": float(level),
+                "value": _json_float(value),
+            })
 
-    # Korelacje real TT vs pred TT
+    stats_df = pd.DataFrame(stat_rows)
+    stats_df.to_csv(batch_dir / "tt_descriptive_stats.csv", index=False)
+    stats_df.to_csv(report_dir / "tt_descriptive_stats.csv", index=False)
+
+    quantile_df = pd.DataFrame(quantile_rows)
+    quantile_df.to_csv(report_dir / "tt_quantiles_long.csv", index=False)
+
+    if not quantile_df.empty:
+        (
+            quantile_df
+            .pivot(index="metric", columns="quantile", values="value")
+            .reset_index()
+            .to_csv(report_dir / "tt_quantiles_wide.csv", index=False)
+        )
+
+    # --------------------------------------------------------
+    # Histogramy
+    # --------------------------------------------------------
+    hist_specs = {
+        "tt_real": ("Histogram real TT", "Ground truth TT"),
+        "tt_pred": ("Histogram predicted TT", "Predicted TT"),
+        "tt_signed_diff": ("Histogram signed TT error", "Predicted TT - Ground truth TT"),
+        "tt_abs_diff": ("Histogram absolute TT error", "|Predicted TT - Ground truth TT|"),
+        "tt_abs_rel_diff_percent": ("Histogram relative TT error", "|pred-real| / real [%]"),
+        "mae_eval": ("Histogram MAE per file", "MAE eval"),
+        "rmse_eval": ("Histogram RMSE per file", "RMSE eval"),
+    }
+
+    for metric, (title, xlabel) in hist_specs.items():
+        if metric in ok_df.columns:
+            _save_histogram_with_bins(
+                out_dir=hist_dir,
+                metric=metric,
+                values=ok_df[metric],
+                bins=hist_bins,
+                title=title,
+                xlabel=xlabel,
+            )
+
+    # --------------------------------------------------------
+    # Korelacje i bias
+    # --------------------------------------------------------
     corr_pearson = ok_df[["tt_real", "tt_pred"]].corr(method="pearson").iloc[0, 1]
     corr_spearman = ok_df[["tt_real", "tt_pred"]].corr(method="spearman").iloc[0, 1]
-
-    # Bias i częstość niedoszacowania
-    n = len(ok_df)
 
     under_mask = ok_df["tt_signed_diff"] < 0
     over_mask = ok_df["tt_signed_diff"] > 0
 
-    summary = {
-        "n_files": int(n),
+    # --------------------------------------------------------
+    # Błąd modelu w najniższym i najwyższym kwartylu TT_real
+    # --------------------------------------------------------
+    tt_q25 = float(ok_df["tt_real"].quantile(0.25))
+    tt_q75 = float(ok_df["tt_real"].quantile(0.75))
 
-        "tt_real_mean": float(ok_df["tt_real"].mean()),
-        "tt_pred_mean": float(ok_df["tt_pred"].mean()),
+    low_quartile_df = ok_df[ok_df["tt_real"] <= tt_q25].copy()
+    high_quartile_df = ok_df[ok_df["tt_real"] >= tt_q75].copy()
 
-        "tt_real_median": float(ok_df["tt_real"].median()),
-        "tt_pred_median": float(ok_df["tt_pred"].median()),
+    quartile_df = pd.DataFrame([
+        _quartile_error_summary(
+            "lowest_25pct_by_tt_real",
+            low_quartile_df,
+            tt_q25,
+            tt_q75,
+        ),
+        _quartile_error_summary(
+            "highest_25pct_by_tt_real",
+            high_quartile_df,
+            tt_q25,
+            tt_q75,
+        ),
+    ])
 
-        "tt_signed_error_mean": float(ok_df["tt_signed_diff"].mean()),
-        "tt_signed_error_median": float(ok_df["tt_signed_diff"].median()),
+    quartile_df.to_csv(report_dir / "tt_error_low_high_real_tt_quartiles.csv", index=False)
+    quartile_df.to_csv(batch_dir / "tt_error_low_high_real_tt_quartiles.csv", index=False)
 
-        "tt_abs_error_mean": float(ok_df["tt_abs_diff"].mean()),
-        "tt_abs_error_median": float(ok_df["tt_abs_diff"].median()),
+    # Pełna analiza po kwartylach.
+    try:
+        ok_df["tt_real_quartile"] = pd.qcut(
+            ok_df["tt_real"],
+            q=4,
+            duplicates="drop",
+        )
 
-        "tt_relative_error_mean": float(ok_df["tt_rel_diff"].mean()),
-        "tt_relative_error_median": float(ok_df["tt_rel_diff"].median()),
+        by_quartile_df = (
+            ok_df
+            .groupby("tt_real_quartile", observed=True)
+            .agg(
+                n_files=("file_name", "count"),
+                tt_real_min=("tt_real", "min"),
+                tt_real_mean=("tt_real", "mean"),
+                tt_real_median=("tt_real", "median"),
+                tt_real_max=("tt_real", "max"),
+                tt_pred_mean=("tt_pred", "mean"),
+                tt_signed_diff_mean=("tt_signed_diff", "mean"),
+                tt_abs_diff_mean=("tt_abs_diff", "mean"),
+                tt_rel_diff_mean=("tt_rel_diff", "mean"),
+                tt_rel_diff_median=("tt_rel_diff", "median"),
+                mae_eval_mean=("mae_eval", "mean"),
+                rmse_eval_mean=("rmse_eval", "mean"),
+            )
+            .reset_index()
+        )
 
-        "tt_relative_error_percent_mean": float(100.0 * ok_df["tt_rel_diff"].mean()),
-        "tt_relative_error_percent_median": float(100.0 * ok_df["tt_rel_diff"].median()),
+        by_quartile_df["tt_real_quartile"] = by_quartile_df["tt_real_quartile"].astype(str)
+        by_quartile_df["tt_rel_diff_percent_mean"] = 100.0 * by_quartile_df["tt_rel_diff_mean"]
+        by_quartile_df["tt_rel_diff_percent_median"] = 100.0 * by_quartile_df["tt_rel_diff_median"]
 
-        "tt_signed_relative_error_mean": float(ok_df["tt_signed_rel_diff"].mean()),
-        "tt_signed_relative_error_median": float(ok_df["tt_signed_rel_diff"].median()),
+        by_quartile_df.to_csv(report_dir / "tt_error_by_real_tt_quartile.csv", index=False)
 
-        "tt_signed_relative_error_percent_mean": float(100.0 * ok_df["tt_signed_rel_diff"].mean()),
-        "tt_signed_relative_error_percent_median": float(100.0 * ok_df["tt_signed_rel_diff"].median()),
+    except Exception as e:
+        print(f"[WARN] Nie udało się policzyć tt_error_by_real_tt_quartile.csv: {repr(e)}")
 
-        "tt_pred_over_real_mean": float(ok_df["tt_pred_over_real"].mean()),
-        "tt_pred_over_real_median": float(ok_df["tt_pred_over_real"].median()),
-
-        "pearson_corr_real_pred_tt": float(corr_pearson),
-        "spearman_corr_real_pred_tt": float(corr_spearman),
-
-        "underprediction_count": int(under_mask.sum()),
-        "overprediction_count": int(over_mask.sum()),
-        "exact_count": int((ok_df["tt_signed_diff"] == 0).sum()),
-
-        "underprediction_fraction": float(under_mask.mean()),
-        "overprediction_fraction": float(over_mask.mean()),
-    }
-
-    with open(batch_dir / "tt_descriptive_summary.json", "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2, ensure_ascii=False)
-
-    pd.DataFrame([summary]).to_csv(batch_dir / "tt_descriptive_summary.csv", index=False)
-
-    # Statystyki po koszykach real TT — przydatne, żeby zobaczyć czy błąd zależy od wielkości symulacji
+    # Zachowanie poprzedniej analizy decylowej.
     try:
         ok_df["tt_real_bin"] = pd.qcut(
             ok_df["tt_real"],
@@ -863,12 +1329,163 @@ def save_detailed_tt_descriptive_stats(batch_dir: Path, per_file_df: pd.DataFram
 
         bin_df["tt_real_bin"] = bin_df["tt_real_bin"].astype(str)
         bin_df.to_csv(batch_dir / "tt_error_by_real_tt_quantile.csv", index=False)
+        bin_df.to_csv(report_dir / "tt_error_by_real_tt_decile.csv", index=False)
 
     except Exception as e:
         print(f"[WARN] Nie udało się policzyć tt_error_by_real_tt_quantile.csv: {repr(e)}")
 
+    # --------------------------------------------------------
+    # Pliki z najniższym i najwyższym TT
+    # --------------------------------------------------------
+    extreme_cols = [
+        "selected_index",
+        "file_name",
+        "tt_real",
+        "tt_pred",
+        "tt_signed_diff",
+        "tt_abs_diff",
+        "tt_rel_diff",
+        "mae_eval",
+        "rmse_eval",
+    ]
+
+    extreme_cols = [c for c in extreme_cols if c in ok_df.columns]
+
+    lowest_tt_df = (
+        ok_df
+        .sort_values("tt_real", ascending=True)
+        .head(top_n)[extreme_cols]
+        .copy()
+    )
+
+    highest_tt_df = (
+        ok_df
+        .sort_values("tt_real", ascending=False)
+        .head(top_n)[extreme_cols]
+        .copy()
+    )
+
+    lowest_tt_df.to_csv(report_dir / "tt_files_lowest_real_tt.csv", index=False)
+    highest_tt_df.to_csv(report_dir / "tt_files_highest_real_tt.csv", index=False)
+
+    lowest_tt_df.to_csv(batch_dir / "tt_files_lowest_real_tt.csv", index=False)
+    highest_tt_df.to_csv(batch_dir / "tt_files_highest_real_tt.csv", index=False)
+
+    with open(report_dir / "tt_extreme_files.json", "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "lowest_real_tt": lowest_tt_df.to_dict(orient="records"),
+                "highest_real_tt": highest_tt_df.to_dict(orient="records"),
+            },
+            f,
+            indent=2,
+            ensure_ascii=False,
+        )
+
+    # --------------------------------------------------------
+    # Summary JSON/CSV
+    # --------------------------------------------------------
+    summary = {
+        "n_files": int(len(ok_df)),
+        "hist_bins_requested": int(hist_bins),
+        "extreme_files_n": int(top_n),
+
+        "tt_real_q25": _json_float(tt_q25),
+        "tt_real_q75": _json_float(tt_q75),
+
+        "tt_real_mean": _json_float(ok_df["tt_real"].mean()),
+        "tt_pred_mean": _json_float(ok_df["tt_pred"].mean()),
+
+        "tt_real_median": _json_float(ok_df["tt_real"].median()),
+        "tt_pred_median": _json_float(ok_df["tt_pred"].median()),
+
+        "tt_signed_error_mean": _json_float(ok_df["tt_signed_diff"].mean()),
+        "tt_signed_error_median": _json_float(ok_df["tt_signed_diff"].median()),
+
+        "tt_abs_error_mean": _json_float(ok_df["tt_abs_diff"].mean()),
+        "tt_abs_error_median": _json_float(ok_df["tt_abs_diff"].median()),
+
+        "tt_relative_error_mean": _json_float(ok_df["tt_rel_diff"].mean()),
+        "tt_relative_error_median": _json_float(ok_df["tt_rel_diff"].median()),
+
+        "tt_relative_error_percent_mean": _json_float(100.0 * ok_df["tt_rel_diff"].mean()),
+        "tt_relative_error_percent_median": _json_float(100.0 * ok_df["tt_rel_diff"].median()),
+
+        "tt_signed_relative_error_mean": _json_float(ok_df["tt_signed_rel_diff"].mean()),
+        "tt_signed_relative_error_median": _json_float(ok_df["tt_signed_rel_diff"].median()),
+
+        "tt_signed_relative_error_percent_mean": _json_float(100.0 * ok_df["tt_signed_rel_diff"].mean()),
+        "tt_signed_relative_error_percent_median": _json_float(100.0 * ok_df["tt_signed_rel_diff"].median()),
+
+        "tt_pred_over_real_mean": _json_float(ok_df["tt_pred_over_real"].mean()),
+        "tt_pred_over_real_median": _json_float(ok_df["tt_pred_over_real"].median()),
+
+        "pearson_corr_real_pred_tt": _json_float(corr_pearson),
+        "spearman_corr_real_pred_tt": _json_float(corr_spearman),
+
+        "underprediction_count": int(under_mask.sum()),
+        "overprediction_count": int(over_mask.sum()),
+        "exact_count": int((ok_df["tt_signed_diff"] == 0).sum()),
+
+        "underprediction_fraction": _json_float(under_mask.mean()),
+        "overprediction_fraction": _json_float(over_mask.mean()),
+
+        "lowest_tt_files": lowest_tt_df["file_name"].astype(str).tolist(),
+        "highest_tt_files": highest_tt_df["file_name"].astype(str).tolist(),
+
+        "report_dir": str(report_dir),
+    }
+
+    for _, qrow in quartile_df.iterrows():
+        prefix = (
+            "low_quartile"
+            if qrow["quartile_group"] == "lowest_25pct_by_tt_real"
+            else "high_quartile"
+        )
+
+        for key in [
+            "n_files",
+            "tt_real_mean",
+            "tt_pred_mean",
+            "tt_abs_diff_mean",
+            "tt_rel_diff_percent_mean",
+            "mae_eval_mean",
+            "rmse_eval_mean",
+            "tt_rel_diff_total",
+        ]:
+            summary[f"{prefix}_{key}"] = (
+                int(qrow[key])
+                if key == "n_files"
+                else _json_float(qrow[key])
+            )
+
+    with open(batch_dir / "tt_descriptive_summary.json", "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False)
+
+    with open(report_dir / "tt_descriptive_summary.json", "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False)
+
+    summary_for_csv = dict(summary)
+    summary_for_csv["lowest_tt_files"] = " | ".join(summary["lowest_tt_files"])
+    summary_for_csv["highest_tt_files"] = " | ".join(summary["highest_tt_files"])
+
+    pd.DataFrame([summary_for_csv]).to_csv(batch_dir / "tt_descriptive_summary.csv", index=False)
+    pd.DataFrame([summary_for_csv]).to_csv(report_dir / "tt_descriptive_summary.csv", index=False)
+
     print("\n=== TT descriptive summary ===")
     print(json.dumps(summary, indent=2, ensure_ascii=False))
+
+    print("\nPliki z najniższym real TT:")
+    for file_name in summary["lowest_tt_files"]:
+        print(f"  - {file_name}")
+
+    print("\nPliki z najwyższym real TT:")
+    for file_name in summary["highest_tt_files"]:
+        print(f"  - {file_name}")
+
+    print(f"Zapisano raport TT w: {report_dir}")
+
+    return summary
 
 
 def plot_real_vs_pred_tt_yzoom(batch_dir: Path, per_file_df: pd.DataFrame):
@@ -958,7 +1575,7 @@ def plot_real_vs_pred_tt_yzoom(batch_dir: Path, per_file_df: pd.DataFrame):
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(batch_dir / "real_tt_vs_predicted_tt_yzoom.png", dpi=240)
+    plt.savefig(batch_dir / "real_tt_vs_predicted_tt_yzoom_dirichlet.png", dpi=240)
     plt.close()
 
 
@@ -1125,7 +1742,7 @@ def plot_real_vs_pred_tt(batch_dir: Path, per_file_df: pd.DataFrame, summary: di
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(batch_dir / "real_tt_vs_predicted_tt.png", dpi=240)
+    plt.savefig(batch_dir / "real_tt_vs_predicted_tt_dirichlet.png", dpi=240)
     plt.close()
 
     plt.figure(figsize=(6, 5))
@@ -1428,6 +2045,30 @@ def build_parser():
     p.add_argument("--continue_on_error", action="store_true")
     p.add_argument("--save_arrays", action="store_true")
     p.add_argument("--dry_run", action="store_true")
+
+    p.add_argument(
+        "--hist_bins",
+        type=int,
+        default=40,
+        help="Liczba koszyków histogramów w raporcie TT.",
+    )
+
+    p.add_argument(
+        "--extreme_files_n",
+        type=int,
+        default=10,
+        help="Ile nazw plików z najniższym i najwyższym TT zapisać/wypisać.",
+    )
+
+    p.add_argument(
+        "--plot_style",
+        nargs="*",
+        default=["science", "no-latex"],
+        help=(
+            "Style matplotlib/SciencePlots, np. --plot_style science no-latex "
+            "albo --plot_style science ieee no-latex."
+        ),
+    )
 
     return p
 
@@ -2116,6 +2757,14 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
+    configure_plot_style(args.plot_style)
+
+    if args.hist_bins <= 0:
+        raise ValueError("--hist_bins musi być > 0")
+
+    if args.extreme_files_n <= 0:
+        raise ValueError("--extreme_files_n musi być > 0")
+
     if args.batch_size_files <= 0:
         raise ValueError("--batch_size_files musi być > 0")
 
@@ -2269,8 +2918,47 @@ def main():
     plot_tt_signed_error_vs_real_tt(batch_dir, per_file_df)
     plot_tt_relative_error_vs_real_tt(batch_dir, per_file_df)
 
-    # Szczegółowe statystyki opisowe
-    save_detailed_tt_descriptive_stats(batch_dir, per_file_df)
+    # Szczegółowe statystyki opisowe TT + histogramy + kwartyle + skrajne pliki.
+    tt_report_summary = save_detailed_tt_descriptive_stats(
+        batch_dir=batch_dir,
+        per_file_df=per_file_df,
+        hist_bins=args.hist_bins,
+        top_n=args.extreme_files_n,
+    )
+
+    if tt_report_summary:
+        for key in [
+            "report_dir",
+            "tt_real_q25",
+            "tt_real_q75",
+            "low_quartile_n_files",
+            "low_quartile_tt_abs_diff_mean",
+            "low_quartile_tt_rel_diff_percent_mean",
+            "low_quartile_mae_eval_mean",
+            "low_quartile_rmse_eval_mean",
+            "high_quartile_n_files",
+            "high_quartile_tt_abs_diff_mean",
+            "high_quartile_tt_rel_diff_percent_mean",
+            "high_quartile_mae_eval_mean",
+            "high_quartile_rmse_eval_mean",
+            "lowest_tt_files",
+            "highest_tt_files",
+        ]:
+            if key in tt_report_summary:
+                summary[f"tt_report_{key}"] = tt_report_summary[key]
+
+        # Nadpisujemy summary po dodaniu raportu TT.
+        with open(batch_dir / "summary.json", "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2, ensure_ascii=False)
+
+        summary_for_csv = dict(summary)
+
+        for key in ["tt_report_lowest_tt_files", "tt_report_highest_tt_files"]:
+            if isinstance(summary_for_csv.get(key), list):
+                summary_for_csv[key] = " | ".join(map(str, summary_for_csv[key]))
+
+        pd.DataFrame([summary_for_csv]).to_csv(batch_dir / "summary.csv", index=False)
+
     # Diagnostyka dwóch poziomów / collapse do baseline'u
     save_two_band_collapse_diagnostics(batch_dir, per_file_df)
 
@@ -2278,7 +2966,8 @@ def main():
     print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)
 
     print(f"\nZapisano wyniki w: {batch_dir}", flush=True)
-    print("Najważniejszy wykres: real_tt_vs_predicted_tt.png", flush=True)
+    print("Najważniejszy wykres: real_tt_vs_predicted_tt_dirichlet.png", flush=True)
+    print("Raport TT: tt_descriptive_report/", flush=True)
 
 
 if __name__ == "__main__":
