@@ -1341,19 +1341,20 @@ def plot_real_vs_pred_tt(batch_dir: Path, per_file_df: pd.DataFrame):
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(batch_dir / "real_tt_vs_predicted_tt.png", dpi=240)
+    plt.savefig(batch_dir / "real_tt_vs_predicted_tt_1.png", dpi=240)
     plt.close()
 
 
 def plot_real_vs_pred_tt_with_regression(
-    batch_dir: Path,
-    per_file_df: pd.DataFrame,
-    regression: dict | None = None,
+        batch_dir: Path,
+        per_file_df: pd.DataFrame,
+        regression: dict | None = None,
 ):
     """
     Wykres 2:
     real TT vs predicted TT + krzywa regresji liniowej.
-    Bez zoomowania osi.
+    Bez zoomowania osi. Zaktualizowana legenda z uwzględnieniem
+    korelacji i uśrednionych procentowych błędów predykcji.
     """
     x, y = _real_pred_arrays(per_file_df)
 
@@ -1378,20 +1379,34 @@ def plot_real_vs_pred_tt_with_regression(
     slope = regression.get("slope", np.nan)
     intercept = regression.get("intercept", np.nan)
     r_squared = regression.get("r_squared", np.nan)
+    r_val = regression.get("r", np.nan)  # Współczynnik korelacji Pearsona
     residual_rmse = regression.get("residual_rmse", np.nan)
+
+    # Obliczenie błędu względnego (procentowego) per plik: 100 * (y - x) / x
+    pct_diffs = np.where(x != 0, 100.0 * (y - x) / x, np.nan)
+
+    # Średnia różnica procentowa uwzględniająca znak (MPE)
+    mean_signed_pct_diff = float(np.nanmean(pct_diffs))
+
+    # Średnia absolutna różnica procentowa (MAPE)
+    mean_abs_pct_diff = float(np.nanmean(np.abs(pct_diffs)))
 
     if np.isfinite(slope) and np.isfinite(intercept):
         x_line = np.linspace(lo, hi, 200)
         y_line = slope * x_line + intercept
 
+        # Konstrukcja wieloliniowego opisu, aby legenda nie była zbyt długa w poziomie
+        legend_label = (
+            f"regression: pred = {slope:.4g} $\\cdot$ real + {intercept:.4g}\n"
+            f"$R^2$ = {r_squared:.4g}; $r$ = {r_val:.4g}; RMSE = {residual_rmse:.4g}\n"
+            f"Mean diff %: {mean_signed_pct_diff:+.2f}% (Mean abs diff: {mean_abs_pct_diff:.2f}%)"
+        )
+
         plt.plot(
             x_line,
             y_line,
             linewidth=1.6,
-            label=(
-                f"regression: pred = {slope:.4g} · real + {intercept:.4g}; "
-                f"R² = {r_squared:.4g}; RMSE = {residual_rmse:.4g}"
-            ),
+            label=legend_label,
         )
 
     plt.title("Real TT vs predicted TT — regression")
@@ -1404,7 +1419,6 @@ def plot_real_vs_pred_tt_with_regression(
     plt.tight_layout()
     plt.savefig(batch_dir / "real_tt_vs_predicted_tt_regression.png", dpi=240)
     plt.close()
-
 
 def write_error_log(batch_dir: Path, file_name: str, error: Exception):
     err_dir = batch_dir / "errors"
@@ -1936,7 +1950,7 @@ def main():
 
     print(f"\nZapisano wyniki w: {batch_dir}", flush=True)
     print("Wykresy TT:", flush=True)
-    print("  - real_tt_vs_predicted_tt.png", flush=True)
+    print("  - real_tt_vs_predicted_tt_1.png", flush=True)
     print("  - real_tt_vs_predicted_tt_regression.png", flush=True)
     print("Raport TT: tt_report/", flush=True)
     print("Histogram TT:", flush=True)
