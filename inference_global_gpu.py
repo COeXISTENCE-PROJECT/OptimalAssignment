@@ -869,35 +869,32 @@ def plot_tt_histogram(
     plt.ylabel("Liczba plików")
     plt.grid(True)
 
-    if selected_peaks_df is not None and not selected_peaks_df.empty:
-        for _, row in selected_peaks_df.iterrows():
-            if "tt_real" not in row.index:
-                continue
+    mean_v = float(s.mean())
+    min_v = float(s.min())
+    max_v = float(s.max())
 
-            value = row.get("tt_real", np.nan)
+    legend_labels = [
+        f"Mean = {mean_v:.4g}",
+        f"Min = {min_v:.4g}",
+        f"Max = {max_v:.4g}",
+    ]
 
-            try:
-                value = float(value)
-            except Exception:
-                continue
+    legend_handles = [
+        plt.Line2D([], [], linestyle="none", label=label)
+        for label in legend_labels
+    ]
 
-            if not np.isfinite(value):
-                continue
+    plt.legend(
+        handles=legend_handles,
+        title="Real TT",
+        fontsize=8,
+        title_fontsize=8,
+        loc="upper left",
+        bbox_to_anchor=(1.02, 1.0),
+        borderaxespad=0.0,
+    )
 
-            label = str(row.get("peak_label", "selected_tt"))
-            file_name = str(row.get("file_name", ""))
-            short_name = safe_stem(file_name)[:28] if file_name else ""
-
-            plt.axvline(
-                value,
-                linestyle="--",
-                linewidth=1.2,
-                label=f"{label}: {value:.4g} {short_name}",
-            )
-
-        plt.legend(fontsize=8)
-
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0, 0.78, 1])
     plt.savefig(out_path, dpi=240)
     plt.close()
 
@@ -1379,8 +1376,7 @@ def plot_real_vs_pred_tt_with_regression(
     slope = regression.get("slope", np.nan)
     intercept = regression.get("intercept", np.nan)
     r_squared = regression.get("r_squared", np.nan)
-    r_val = regression.get("r", np.nan)  # Współczynnik korelacji Pearsona
-    residual_rmse = regression.get("residual_rmse", np.nan)
+    r_val = regression.get("r", np.nan)
 
     # Obliczenie błędu względnego (procentowego) per plik: 100 * (y - x) / x
     pct_diffs = np.where(x != 0, 100.0 * (y - x) / x, np.nan)
@@ -1397,15 +1393,17 @@ def plot_real_vs_pred_tt_with_regression(
 
         # Konstrukcja wieloliniowego opisu, aby legenda nie była zbyt długa w poziomie
         legend_label = (
-            f"regression: pred = {slope:.4g} $\\cdot$ real + {intercept:.4g}\n"
-            f"$R^2$ = {r_squared:.4g}; $r$ = {r_val:.4g}; RMSE = {residual_rmse:.4g}\n"
-            f"Mean diff %: {mean_signed_pct_diff:+.2f}% (Mean abs diff: {mean_abs_pct_diff:.2f}%)"
+            f"Regression\n"
+            f"Correlation = {r_val:.4g}\n"
+            f"$R^2$ = {r_squared:.4g}\n"
+            f"Mean \\% diff = {mean_signed_pct_diff:+.2f}\\%"
         )
 
         plt.plot(
             x_line,
             y_line,
-            linewidth=1.6,
+            linewidth=1.8,
+            color="tab:green",
             label=legend_label,
         )
 
