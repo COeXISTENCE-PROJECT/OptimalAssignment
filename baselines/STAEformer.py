@@ -1,6 +1,5 @@
 import torch.nn as nn
 import torch
-from torchinfo import summary
 
 
 class AttentionLayer(nn.Module):
@@ -252,4 +251,3 @@ class STAEformer(nn.Module):
 
 if __name__ == "__main__":
     model = STAEformer(207, 12, 12)
-    summary(model, [64, 12, 207, 3])

@@ -49,7 +49,7 @@ blocks=4
 layers=2
 
 target_dim=1
-sequence_model=lstm           # lstm / gru
+sequence_model=lstm           # lstm_concat / gru
 fuse_method=Attention         # Attention / Concat / MLP
 a_embedding_size=64
 a_hidden_size=64

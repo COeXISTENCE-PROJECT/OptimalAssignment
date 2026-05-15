@@ -1,11 +1,9 @@
 import torch
-import torch.nn as nn
 import torch.optim as optim
-import util
-from ADTTP_Model import ADTTP
+from GenTTP import GenTTP
 
 
-class TrainerADTTP:
+class TrainerGenTTP:
     def __init__(
         self,
         scaler,
@@ -24,7 +22,7 @@ class TrainerADTTP:
         blocks=4,
         layers=3,
         target_dim=1,
-        sequence_model="lstm",
+        sequence_model="lstm_concat",
         fuse_method="attention",
         a_embedding_size=32,
         a_hidden_size=32,
@@ -53,7 +51,7 @@ class TrainerADTTP:
             "layers": layers,
         }
 
-        self.model = ADTTP(
+        self.model = GenTTP(
             num_nodes=num_nodes,
             supports=supports,
             q_in_dim=in_dim,
@@ -105,20 +103,6 @@ class TrainerADTTP:
     def _rmse(self, pred, real):
         return torch.sqrt(torch.mean((pred - real) ** 2))
 
-    def _huber(self, pred, real):
-        error = pred - real
-        abs_error = torch.abs(error)
-
-        delta = torch.tensor(
-            self.huber_delta,
-            dtype=pred.dtype,
-            device=pred.device,
-        )
-
-        quadratic = torch.minimum(abs_error, delta)
-        linear = abs_error - quadratic
-        loss = 0.5 * quadratic ** 2 + delta * linear
-        return torch.mean(loss)
 
     def _adj_mape(self, pred, real, offset=1.0):
         return torch.mean(torch.abs(pred - real) / (real + offset))
@@ -147,8 +131,6 @@ class TrainerADTTP:
             return self._rmse
         elif loss_name == "adj_mape":
             return self._adj_mape
-        elif loss_name == "huber":
-            return self._huber
         elif loss_name == "flow_cons":
             return self._flow_cons
         else:
@@ -163,7 +145,6 @@ class TrainerADTTP:
             "adj_mape": self._adj_mape(pred, real).item(),
             "flow_cons": self._flow_cons(pred, real).item(),
             "mae_adj_mape_loss": self._mae_with_adj_mape(pred, real).item(),
-            "huber": self._huber(pred, real).item(),
         }
 
     def _unpack_batch(self, batch_or_q, a=None, real_val=None, lengths=None):
