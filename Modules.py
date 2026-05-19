@@ -4,6 +4,8 @@ import torch.nn.functional as F
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 import math
 from baselines.STAEformer import STAEformer
+from baselines.Graph_WaveNet import gwnet
+from baselines.AGCRN import AGCRNCell, AVWGCN
 
 
 
@@ -27,6 +29,48 @@ class nconv(nn.Module):
         """
         x = torch.einsum('ncvl,vw->ncwl', (x, adj))
         return x.contiguous()
+
+class gcn(nn.Module):
+    """
+    Graph Convolution Network (GCN) module.
+    Implements diffusion graph convolution.
+    """
+
+    def __init__(self, c_in, c_out, dropout, support_len=3, order=2):
+        super(gcn, self).__init__()
+        self.nconv = nconv()
+
+        # Calculate input channels for the linear layer.
+        # (order * support_len + 1) accounts for the original signal
+        # and signals after 'k' diffusion steps for each support matrix.
+        c_in = (order * support_len + 1) * c_in
+        self.mlp = linear(c_in, c_out)
+        self.dropout = dropout
+        self.order = order
+
+    def forward(self, x, support):
+        """
+        x: Input data_old
+        support: List of adjacency matrices (e.g., original, transposed, adaptive)
+        """
+        out = [x]
+
+        # For each support matrix (e.g., forward/backward directed graph)
+        for a in support:
+            x1 = self.nconv(x, a)
+            out.append(x1)
+            # Multi-step diffusion (order k)
+            for k in range(2, self.order + 1):
+                x2 = self.nconv(x1, a)
+                out.append(x2)
+                x1 = x2
+
+        # Concatenate processed signals along the channel dimension
+        h = torch.cat(out, dim=1)
+        # Linear layer (dimensionality reduction and feature mixing)
+        h = self.mlp(h)
+        h = F.dropout(h, self.dropout, training=self.training)
+        return h
 
 
 class linear(nn.Module):
@@ -664,220 +708,6 @@ class AttentionRepresentation(nn.Module):
             return results[0]
         return tuple(results)
 
-class gcn(nn.Module):
-    """
-    Graph Convolution Network (GCN) module.
-    Implements diffusion graph convolution.
-    """
-
-    def __init__(self, c_in, c_out, dropout, support_len=3, order=2):
-        super(gcn, self).__init__()
-        self.nconv = nconv()
-
-        # Calculate input channels for the linear layer.
-        # (order * support_len + 1) accounts for the original signal
-        # and signals after 'k' diffusion steps for each support matrix.
-        c_in = (order * support_len + 1) * c_in
-        self.mlp = linear(c_in, c_out)
-        self.dropout = dropout
-        self.order = order
-
-    def forward(self, x, support):
-        """
-        x: Input data_old
-        support: List of adjacency matrices (e.g., original, transposed, adaptive)
-        """
-        out = [x]
-
-        # For each support matrix (e.g., forward/backward directed graph)
-        for a in support:
-            x1 = self.nconv(x, a)
-            out.append(x1)
-            # Multi-step diffusion (order k)
-            for k in range(2, self.order + 1):
-                x2 = self.nconv(x1, a)
-                out.append(x2)
-                x1 = x2
-
-        # Concatenate processed signals along the channel dimension
-        h = torch.cat(out, dim=1)
-        # Linear layer (dimensionality reduction and feature mixing)
-        h = self.mlp(h)
-        h = F.dropout(h, self.dropout, training=self.training)
-        return h
-
-
-class gwnet(nn.Module):
-    """
-    Main Graph WaveNet model.
-    Combines Temporal Convolutional Networks (TCN) for temporal dependencies
-    and Graph Convolutional Networks (GCN) for spatial dependencies.
-    """
-
-    def __init__(self, device, num_nodes, dropout=0.3, supports=None, gcn_bool=True, addaptadj=True, aptinit=None,
-                 in_dim=1, out_dim=12, residual_channels=32, dilation_channels=32, skip_channels=256, end_channels=512,
-                 kernel_size=2, blocks=4, layers=2):
-        super(gwnet, self).__init__()
-        self.dropout = dropout
-        self.blocks = blocks
-        self.layers = layers
-        self.gcn_bool = gcn_bool
-        self.addaptadj = addaptadj
-
-        self.filter_convs = nn.ModuleList()
-        self.gate_convs = nn.ModuleList()
-        self.residual_convs = nn.ModuleList()
-        self.skip_convs = nn.ModuleList()
-        self.bn = nn.ModuleList()
-        self.gconv = nn.ModuleList()
-
-        # Initial 1x1 convolution matching input channels to residual_channels
-        self.start_conv = nn.Conv2d(in_channels=in_dim,
-                                    out_channels=residual_channels,
-                                    kernel_size=(1, 1))
-        self.supports = supports
-
-        receptive_field = 1
-
-        self.supports_len = 0
-        if supports is not None:
-            self.supports_len += len(supports)
-
-        # Initialize adaptive adjacency matrix
-        if gcn_bool and addaptadj:
-            if aptinit is None:
-                if supports is None:
-                    self.supports = []
-                # Random initialization of node embeddings
-                self.nodevec1 = nn.Parameter(torch.randn(num_nodes, 10).to(device), requires_grad=True).to(device)
-                self.nodevec2 = nn.Parameter(torch.randn(10, num_nodes).to(device), requires_grad=True).to(device)
-                self.supports_len += 1
-            else:
-                if supports is None:
-                    self.supports = []
-                # SVD-based initialization
-                m, p, n = torch.svd(aptinit)
-                initemb1 = torch.mm(m[:, :10], torch.diag(p[:10] ** 0.5))
-                initemb2 = torch.mm(torch.diag(p[:10] ** 0.5), n[:, :10].t())
-                self.nodevec1 = nn.Parameter(initemb1, requires_grad=True).to(device)
-                self.nodevec2 = nn.Parameter(initemb2, requires_grad=True).to(device)
-                self.supports_len += 1
-
-        # Build WaveNet (TCN) layers
-        for b in range(blocks):
-            additional_scope = kernel_size - 1
-            new_dilation = 1
-            for i in range(layers):
-                # Dilated convolutions
-                # Two paths: filter and gate (LSTM/GRU-like gating mechanism)
-                self.filter_convs.append(nn.Conv2d(in_channels=residual_channels,
-                                                   out_channels=dilation_channels,
-                                                   kernel_size=(1, kernel_size), dilation=(1, new_dilation)))
-
-                self.gate_convs.append(nn.Conv2d(in_channels=residual_channels,
-                                                 out_channels=dilation_channels,
-                                                 kernel_size=(1, kernel_size), dilation=(1, new_dilation)))
-
-                # 1x1 convolution for residual connection
-                self.residual_convs.append(nn.Conv2d(in_channels=dilation_channels,
-                                                     out_channels=residual_channels,
-                                                     kernel_size=(1, 1)))
-
-                # 1x1 convolution for skip connection
-                self.skip_convs.append(nn.Conv2d(in_channels=dilation_channels,
-                                                 out_channels=skip_channels,
-                                                 kernel_size=(1, 1)))
-                self.bn.append(nn.BatchNorm2d(residual_channels))
-                new_dilation *= 2
-                receptive_field += additional_scope
-                additional_scope *= 2
-
-                # Add GCN layer in each block if enabled
-                if self.gcn_bool:
-                    self.gconv.append(gcn(dilation_channels, residual_channels, dropout, support_len=self.supports_len))
-
-        # Output layers
-        self.end_conv_1 = nn.Conv2d(in_channels=skip_channels,
-                                    out_channels=end_channels,
-                                    kernel_size=(1, 1),
-                                    bias=True)
-
-        self.end_conv_2 = nn.Conv2d(in_channels=end_channels,
-                                    out_channels=out_dim,
-                                    kernel_size=(1, 1),
-                                    bias=True)
-
-        self.receptive_field = receptive_field
-
-    def forward(self, input):
-
-        in_len = input.size(3)
-
-        # Pad input if the sequence is shorter than the receptive field
-        if in_len < self.receptive_field:
-            x = nn.functional.pad(input, (self.receptive_field - in_len, 0, 0, 0))
-        else:
-            x = input
-
-        x = self.start_conv(x)
-        skip = 0
-
-        # Calculate adaptive adjacency matrix once per iteration
-        new_supports = None
-        if self.gcn_bool and self.addaptadj and self.supports is not None:
-            # adp = softmax(ReLU(E1 * E2))
-            adp = F.softmax(F.relu(torch.mm(self.nodevec1, self.nodevec2)), dim=1)
-            new_supports = self.supports + [adp]
-
-        # Loop through WaveNet layers
-        for i in range(self.blocks * self.layers):
-
-            #            |----------------------------------------|     *residual*
-            #            |                                        |
-            #            |    |-- conv -- tanh --|                |
-            # -> dilate -|----|                  * ----|-- 1x1 -- + --> *input*
-            #                 |-- conv -- sigm --|     |
-            #                                         1x1
-            #                                          |
-            # ---------------------------------------> + -------------> *skip*
-
-            residual = x
-
-            # Dilated convolution (temporal)
-            filter = self.filter_convs[i](residual)
-            filter = torch.tanh(filter)  # Filter activation
-            gate = self.gate_convs[i](residual)
-            gate = torch.sigmoid(gate)
-            x = filter * gate  # Gated TCN
-
-            # Parametrized skip connection (accumulating intermediate results)
-            s = x
-            s = self.skip_convs[i](s)
-            try:
-                skip = skip[:, :, :, -s.size(3):]
-            except:
-                skip = 0
-            skip = s + skip
-
-            # Spatial processing (GCN)
-            if self.gcn_bool and self.supports is not None:
-                supports = new_supports if self.addaptadj else self.supports
-                x = self.gconv[i](x, supports)
-            else:
-                x = self.residual_convs[i](x)
-
-            # Add residual connection
-            x = x + residual[:, :, :, -x.size(3):]
-
-            # Normalization
-            x = self.bn[i](x)
-
-        # Final processing of accumulated skip connections
-        x = F.relu(skip)
-        x = F.relu(self.end_conv_1(x))
-        x = self.end_conv_2(x)
-        return x
-
 
 class GraphWaveNetBackbone(gwnet):
     """
@@ -1091,12 +921,12 @@ class GraphWaveNetBackbone(gwnet):
 
 class STAEformerBackbone(nn.Module):
     """
-    Adapter STAEformer zgodny z GraphWaveNetBackbone.forward_features.
+    STAEformer as a flow processing branch
 
-    Wejście:
+    input
         q: (B, T, N)
 
-    Wyjście:
+    output
         features: (B, model_dim, N, T)
     """
 
@@ -1138,8 +968,8 @@ class STAEformerBackbone(nn.Module):
 
         if self.encoder.model_dim % num_heads != 0:
             raise ValueError(
-                f"STAEformer model_dim={self.encoder.model_dim} musi być podzielne "
-                f"przez num_heads={num_heads}."
+                f"model_dim={self.encoder.model_dim} must be divisible"
+                f"by num_heads={num_heads}."
             )
 
         self.num_nodes = num_nodes
@@ -1197,139 +1027,10 @@ class STAEformerBackbone(nn.Module):
         for attn in enc.attn_layers_s:
             x = attn(x, dim=2)
 
-        # GraphWaveNetBackbone.forward_features daje (B, C, N, T_out),
-        # więc zwracamy taki sam układ.
         return x.permute(0, 3, 2, 1).contiguous()
 
 
 
-class AVWGCN(nn.Module):
-    """
-    Adaptive Vertex-wise Graph Convolution, AGCRN-style.
-
-    x:              (B, N, C_in)
-    node_embeddings:(N, D)
-    return:         (B, N, C_out)
-    """
-
-    def __init__(
-        self,
-        dim_in: int,
-        dim_out: int,
-        cheb_k: int,
-        embed_dim: int,
-    ):
-        super().__init__()
-        self.cheb_k = cheb_k
-        self.weights_pool = nn.Parameter(
-            torch.empty(embed_dim, cheb_k, dim_in, dim_out)
-        )
-        self.bias_pool = nn.Parameter(torch.empty(embed_dim, dim_out))
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        nn.init.xavier_uniform_(self.weights_pool)
-        nn.init.xavier_uniform_(self.bias_pool)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        node_embeddings: torch.Tensor,
-    ) -> torch.Tensor:
-        num_nodes = node_embeddings.size(0)
-        device = x.device
-        dtype = x.dtype
-
-        node_embeddings = node_embeddings.to(device=device, dtype=dtype)
-
-        # adaptive adjacency: (N, N)
-        supports = F.softmax(
-            F.relu(torch.mm(node_embeddings, node_embeddings.t())),
-            dim=1,
-        )
-
-        support_set = [
-            torch.eye(num_nodes, device=device, dtype=dtype),
-            supports,
-        ]
-
-        # Chebyshev basis
-        for _ in range(2, self.cheb_k):
-            support_set.append(
-                2 * torch.matmul(supports, support_set[-1]) - support_set[-2]
-            )
-
-        supports = torch.stack(support_set, dim=0)  # (K, N, N)
-
-        # graph signal: (B, K, N, C_in) -> (B, N, K, C_in)
-        x_g = torch.einsum("knm,bmc->bknc", supports, x)
-        x_g = x_g.permute(0, 2, 1, 3)
-
-        # node-specific weights
-        weights = torch.einsum(
-            "nd,dkio->nkio",
-            node_embeddings,
-            self.weights_pool.to(device=device, dtype=dtype),
-        )  # (N, K, C_in, C_out)
-
-        bias = torch.matmul(
-            node_embeddings,
-            self.bias_pool.to(device=device, dtype=dtype),
-        )  # (N, C_out)
-
-        out = torch.einsum("bnki,nkio->bno", x_g, weights) + bias
-        return out
-
-
-class AGCRNCell(nn.Module):
-    """
-    GRU cell with adaptive graph convolution.
-    """
-
-    def __init__(
-        self,
-        input_dim: int,
-        hidden_dim: int,
-        cheb_k: int,
-        embed_dim: int,
-    ):
-        super().__init__()
-        self.hidden_dim = hidden_dim
-
-        self.gate = AVWGCN(
-            dim_in=input_dim + hidden_dim,
-            dim_out=2 * hidden_dim,
-            cheb_k=cheb_k,
-            embed_dim=embed_dim,
-        )
-
-        self.update = AVWGCN(
-            dim_in=input_dim + hidden_dim,
-            dim_out=hidden_dim,
-            cheb_k=cheb_k,
-            embed_dim=embed_dim,
-        )
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        h: torch.Tensor,
-        node_embeddings: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        x: (B, N, input_dim)
-        h: (B, N, hidden_dim)
-        """
-        x_h = torch.cat([x, h], dim=-1)
-
-        z_r = torch.sigmoid(self.gate(x_h, node_embeddings))
-        z, r = torch.split(z_r, self.hidden_dim, dim=-1)
-
-        candidate_input = torch.cat([x, r * h], dim=-1)
-        h_tilde = torch.tanh(self.update(candidate_input, node_embeddings))
-
-        h_new = z * h + (1.0 - z) * h_tilde
-        return h_new
 
 
 class AGCRNBackbone(nn.Module):
