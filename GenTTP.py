@@ -312,15 +312,15 @@ class GenTTP(nn.Module):
         if gate_threshold is None:
             gate_threshold = self.default_gate_threshold
 
-        q, q_was_unbatched = self._ensure_batch_sequence(q, "q")
-        a, a_was_unbatched = self._ensure_batch_sequence(a, "a")
+        q, q_was_unbatched = _ensure_batch_sequence(q, "q")
+        a, a_was_unbatched = _ensure_batch_sequence(a, "a")
 
         if q.size(0) != a.size(0):
             raise ValueError(
                 f"Batch size mismatch: q has batch={q.size(0)}, a has batch={a.size(0)}"
             )
 
-        lengths = self._normalize_lengths(
+        lengths = _normalize_lengths(
             lengths,
             batch_size=a.size(0),
             device=a.device,
