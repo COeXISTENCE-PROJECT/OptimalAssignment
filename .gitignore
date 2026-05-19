@@ -4,3 +4,9 @@ garage/*
 __pycache__/*
 *.sh
 dataset_utils/__pycache__/*
+/dataset_utils/dataloader_debug.py
+/neurips/
+/RL_artefacts/
+/garage/
+/tests_and_infernce/
+/utils/
