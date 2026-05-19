@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from dataset_utils.DataLoader import SumoFolderDataset
+from DataLoader import SumoFolderDataset
 from torch.utils.data import DataLoader
 from pathlib import Path
 import random
@@ -255,3 +255,34 @@ def _normalize_lengths(
         )
 
     return lengths
+
+
+def mae(pred, real):
+    return torch.mean(torch.abs(pred - real))
+
+
+def rmse(pred, real):
+    return torch.sqrt(torch.mean((pred - real) ** 2))
+
+
+def compute_metrics(pred, real, loss_value):
+    return {
+        "loss": loss_value.item(),
+        "mae": mae(pred, real).item(),
+        "rmse": rmse(pred, real).item(),
+    }
+
+
+def unpack_batch(batch_or_q, a=None, real_val=None, lengths=None):
+    if isinstance(batch_or_q, dict) and "x" in batch_or_q and "y" in batch_or_q:
+        x = batch_or_q["x"]
+        q = x["q"]
+        a = x["a"]
+        real_val = batch_or_q["y"]
+
+        if lengths is None:
+            lengths = x.get("lengths", batch_or_q.get("lengths", None))
+
+        return q, a, real_val, lengths
+
+    return batch_or_q, a, real_val, lengths

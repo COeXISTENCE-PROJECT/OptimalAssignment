@@ -190,7 +190,6 @@ def main():
         mlp_hidden_dim=args.mlp_hidden_dim,
         attention_num_heads=args.attention_num_heads,
         attention_ff_dim=args.attention_ff_dim,
-        loss_name="mae",
     )
 
     history = {
@@ -267,7 +266,7 @@ def main():
     save_learning_curves(history, curves_path)
     print(f"Learning curves saved to: {curves_path}")
 
-    # Evaluate best checkpoint on the test set
+    # Evaluate the best checkpoint on the test set
     engine.model.load_state_dict(torch.load(best_model_path, map_location=device))
     test_metrics = evaluate_loader(engine, test_loader)
 

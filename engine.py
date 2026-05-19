@@ -2,6 +2,9 @@ import torch
 import torch.optim as optim
 from GenTTP import GenTTP
 
+from utilities import mae, compute_metrics, unpack_batch
+
+
 
 class TrainerGenTTP:
     def __init__(
@@ -22,8 +25,8 @@ class TrainerGenTTP:
         blocks=4,
         layers=3,
         target_dim=1,
-        sequence_model="lstm_concat",
-        fuse_method="attention",
+        sequence_model="lstm",
+        fuse_method="concatenate",
         a_embedding_size=32,
         a_hidden_size=32,
         q_rep_dim=32,
@@ -31,9 +34,6 @@ class TrainerGenTTP:
         mlp_hidden_dim=64,
         attention_num_heads=4,
         attention_ff_dim=64,
-        loss_name="mae",
-        alpha = "1",
-        huber_delta="1",
     ):
         self.device = device
 
@@ -73,14 +73,6 @@ class TrainerGenTTP:
             self.model.parameters(), lr=lrate, weight_decay=wdecay
         )
 
-        self.loss_name = loss_name.lower()
-        if not 0.0 <= alpha <= 1.0:
-            raise ValueError(f"alpha must be in [0, 1], got {alpha}")
-        self.hyber_delta = float(huber_delta)
-        if self.huber_delta <= 0:
-            raise ValueError(f"huber_delta must be positive, got {self.huber_delta}")
-        self.alpha = alpha
-        self.loss = self._get_loss_fn(self.loss_name)
 
         self.scaler = scaler
         self.clip = 5
@@ -93,82 +85,14 @@ class TrainerGenTTP:
 
         return real
 
-    def _mae(self, pred, real):
-        return torch.mean(torch.abs(pred - real))
-
-    def _mape(self, pred, real, eps=1e-8):
-        denom = torch.clamp(torch.abs(real), min=eps)
-        return torch.mean(torch.abs((pred - real) / denom))
-
-    def _rmse(self, pred, real):
-        return torch.sqrt(torch.mean((pred - real) ** 2))
-
-
-    def _adj_mape(self, pred, real, offset=1.0):
-        return torch.mean(torch.abs(pred - real) / (real + offset))
-
-    def _mae_with_adj_mape(self, pred, real):
-        return (
-            self.alpha * self._mae(pred, real)
-            + (1 - self.alpha) * self._adj_mape(pred, real)
-        )
-
-    def _flow_cons(self, pred, real, offset=1.0):
-        if pred.dim() not in (2, 3):
-            raise ValueError(f"Unsupported shape for flow_cons: {tuple(pred.shape)}")
-
-        pred_sum = pred.sum(dim=-1)
-        real_sum = real.sum(dim=-1)
-
-        return torch.mean(torch.abs(pred_sum - real_sum) / (torch.abs(real_sum) + offset))
-
-    def _get_loss_fn(self, loss_name):
-        if loss_name == "mae":
-            return self._mae_with_adj_mape
-        elif loss_name == "mape":
-            return self._mape
-        elif loss_name == "rmse":
-            return self._rmse
-        elif loss_name == "adj_mape":
-            return self._adj_mape
-        elif loss_name == "flow_cons":
-            return self._flow_cons
-        else:
-            raise ValueError(f"Unsupported loss: {loss_name}")
-
-    def _compute_metrics(self, pred, real, loss_value):
-        return {
-            "loss": loss_value.item(),
-            "mae": self._mae(pred, real).item(),
-            "mape": self._mape(pred, real).item(),
-            "rmse": self._rmse(pred, real).item(),
-            "adj_mape": self._adj_mape(pred, real).item(),
-            "flow_cons": self._flow_cons(pred, real).item(),
-            "mae_adj_mape_loss": self._mae_with_adj_mape(pred, real).item(),
-        }
-
-    def _unpack_batch(self, batch_or_q, a=None, real_val=None, lengths=None):
-        if isinstance(batch_or_q, dict) and "x" in batch_or_q and "y" in batch_or_q:
-            x = batch_or_q["x"]
-            q = x["q"]
-            a = x["a"]
-            real_val = batch_or_q["y"]
-
-            if lengths is None:
-                lengths = x.get("lengths", batch_or_q.get("lengths", None))
-
-            return q, a, real_val, lengths
-
-        return batch_or_q, a, real_val, lengths
 
     def train(self, batch_or_q, a=None, real_val=None, lengths=None):
         self.model.train()
         self.optimizer.zero_grad()
 
-        q, a, real_val, lengths = self._unpack_batch(
+        q, a, real_val, lengths = unpack_batch(
             batch_or_q, a=a, real_val=real_val, lengths=lengths
         )
-
         q = q.to(self.device)
         a = a.to(self.device)
         real_val = real_val.to(self.device)
@@ -183,7 +107,7 @@ class TrainerGenTTP:
 
         real = self._prepare_target(pred, real_val)
 
-        loss = self.loss(pred, real)
+        loss = mae(pred, real)
         loss.backward()
 
         if self.clip is not None:
@@ -191,13 +115,13 @@ class TrainerGenTTP:
 
         self.optimizer.step()
 
-        return self._compute_metrics(pred, real, loss)
+        return compute_metrics(pred, real, loss)
 
     @torch.no_grad()
     def eval(self, batch_or_q, a=None, real_val=None, lengths=None):
         self.model.eval()
 
-        q, a, real_val, lengths = self._unpack_batch(
+        q, a, real_val, lengths = unpack_batch(
             batch_or_q, a=a, real_val=real_val, lengths=lengths
         )
 
@@ -215,6 +139,6 @@ class TrainerGenTTP:
 
         real = self._prepare_target(pred, real_val)
 
-        loss = self.loss(pred, real)
+        loss = mae(pred, real)
 
-        return self._compute_metrics(pred, real, loss)
+        return compute_metrics(pred, real, loss)
