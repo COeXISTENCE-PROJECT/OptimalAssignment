@@ -74,7 +74,7 @@ class SumoFolderDataset(Dataset):
         for f_name in self.exp_files:
             flow_data = np.load(flow_files[f_name], mmap_mode="r")
 
-            # zakładamy flow jako (N, T)
+            # flow as (N, T)
             if flow_data.ndim != 2:
                 raise ValueError(
                     f"flow file {f_name} must have shape (N, T), got {flow_data.shape}"
@@ -136,10 +136,9 @@ class SumoFolderDataset(Dataset):
         a_padded = np.zeros((self.seq_length_a, self.target_nodes), dtype=np.float32)
         a_end = t_end + 1
 
-        # maska pozycji, które są zerowe przez całe okno a
 
         if assign.ndim == 2:
-            # assign jako (N, T)
+            # assignment as (N,T)
             if assign.shape[0] == current_nodes:
                 if assign.shape[1] >= a_end:
                     a_slice = assign[:nodes_to_copy, a_start:a_end].T
@@ -149,7 +148,6 @@ class SumoFolderDataset(Dataset):
                         f"assign has too few timesteps: shape={assign.shape}, a_end={a_end}"
                     )
 
-            # assign jako (T, N)
             elif assign.shape[1] == current_nodes:
                 if assign.shape[0] >= a_end:
                     a_slice = assign[a_start:a_end, :nodes_to_copy]
@@ -162,7 +160,6 @@ class SumoFolderDataset(Dataset):
                 raise ValueError(f"Unsupported assign shape: {assign.shape}")
 
         elif assign.ndim == 3 and assign.shape[-1] == 1:
-            # assign jako (N, T, 1)
             if assign.shape[0] == current_nodes:
                 if assign.shape[1] >= a_end:
                     a_slice = assign[:nodes_to_copy, a_start:a_end, 0].T
@@ -172,7 +169,6 @@ class SumoFolderDataset(Dataset):
                         f"assign has too few timesteps: shape={assign.shape}, a_end={a_end}"
                     )
 
-            # assign jako (T, N, 1)
             elif assign.shape[1] == current_nodes:
                 if assign.shape[0] >= a_end:
                     a_slice = assign[a_start:a_end, :nodes_to_copy, 0]
@@ -189,7 +185,6 @@ class SumoFolderDataset(Dataset):
                 f"assign must have shape (N, T), (T, N), (N, T, 1) or (T, N, 1), got {assign.shape}"
             )
 
-        # y -> shape (N) albo (Hy, N)
         y_padded = np.zeros((self.seq_length_y, self.target_nodes), dtype=np.float32)
         if y_end <= flow.shape[1]:
             y_slice = flow[:nodes_to_copy, y_start:y_end].T
