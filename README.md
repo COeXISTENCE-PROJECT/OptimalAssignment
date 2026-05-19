@@ -3,9 +3,8 @@ This is the original implementation of GenTTP.
 
 
 <p align="center">
-  <img width="350" height="400" src=./images/model.pdf>
+  <img width="650" src="./images/GenTTP_Model.png">
 </p>
-
 Minimal training code for the GenTTP model used in the paper.
 
 ## Requirements
