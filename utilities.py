@@ -150,7 +150,7 @@ def infer_target_dim_from_batch(batch):
         # (B, N) -> one-step prediction
         return 1
     if y.dim() == 3:
-        # zakładamy (B, H, N)
+        # (B, H, N)
         return y.shape[1]
     raise ValueError(f"Unsupported y shape: {tuple(y.shape)}")
 
@@ -160,32 +160,11 @@ def maybe_inverse_transform(scaler, x):
         return x
     return scaler.inverse_transform(x)
 
-def adjusted_mape(pred, real, offset=1.0):
-    return torch.mean(torch.abs(pred - real) / (torch.abs(real) + offset))
-
-
-def flow_conservation(pred, real, offset=1.0):
-    if pred.dim() == 2:
-        # (B, N)
-        pred_sum = pred.sum(dim=1)
-        real_sum = real.sum(dim=1)
-    elif pred.dim() == 3:
-        # (B, H, N)
-        pred_sum = pred.sum(dim=2)
-        real_sum = real.sum(dim=2)
-    else:
-        raise ValueError(f"Unsupported prediction shape for flow_conservation: {tuple(pred.shape)}")
-
-    return torch.mean(torch.abs(pred_sum - real_sum) / (torch.abs(real_sum) + offset))
-
 def init_metric_acc():
     return {
         "loss": 0.0,
         "mae": 0.0,
-        "mape": 0.0,
         "rmse": 0.0,
-        "adj_mape": 0.0,
-        "flow_cons": 0.0,
         "n": 0,
     }
 
@@ -195,10 +174,7 @@ def update_metric_acc(acc, metrics, batch):
 
     acc["loss"] += metrics["loss"] * bs
     acc["mae"] += metrics["mae"] * bs
-    acc["mape"] += metrics["mape"] * bs
     acc["rmse"] += metrics["rmse"] * bs
-    acc["adj_mape"] += metrics["adj_mape"] * bs
-    acc["flow_cons"] += metrics["flow_cons"] * bs
     acc["n"] += bs
 
 
@@ -207,10 +183,7 @@ def finalize_metric_acc(acc):
     return {
         "loss": acc["loss"] / n,
         "mae": acc["mae"] / n,
-        "mape": acc["mape"] / n,
         "rmse": acc["rmse"] / n,
-        "adj_mape": acc["adj_mape"] / n,
-        "flow_cons": acc["flow_cons"] / n,
     }
 
 def evaluate_loader(engine, loader):
