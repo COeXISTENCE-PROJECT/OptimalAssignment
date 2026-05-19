@@ -3,6 +3,18 @@ import torch
 import torch.nn.functional as F
 
 
+class linear(nn.Module):
+    """
+    Linear layer implemented as a 1x1 convolution.
+    """
+
+    def __init__(self, c_in, c_out):
+        super(linear, self).__init__()
+        self.mlp = torch.nn.Conv2d(c_in, c_out, kernel_size=(1, 1), padding=(0, 0), stride=(1, 1), bias=True)
+
+    def forward(self, x):
+        return self.mlp(x)
+
 class nconv(nn.Module):
     """
     Simple graph convolution layer.
