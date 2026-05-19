@@ -3,7 +3,7 @@ This is the original implementation of GenTTP.
 
 
 <p align="center">
-  <img width="650" src="./images/GenTTP_Model.png">
+  <img width="1000" src="./images/GenTTP_Model.png">
 </p>
 Minimal training code for the GenTTP model used in the paper.
 
