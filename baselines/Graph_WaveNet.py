@@ -1,8 +1,69 @@
 import torch.nn as nn
 import torch
-from Modules import gcn
 import torch.nn.functional as F
 
+
+class nconv(nn.Module):
+    """
+    Simple graph convolution layer.
+    Multiplies node features by the adjacency matrix.
+    """
+
+    def __init__(self):
+        super(nconv, self).__init__()
+
+    def forward(self, x, adj):
+        """
+        x: Input features (batch_size, num_channels, num_nodes, time_steps)
+        A: Adjacency matrix (num_nodes, num_nodes)
+
+        The einsum operation 'ncvl,vw->ncwl' effectively multiplies each
+        node's features by the edge weights of its neighbors.
+        """
+        x = torch.einsum('ncvl,vw->ncwl', (x, adj))
+        return x.contiguous()
+
+class gcn(nn.Module):
+    """
+    Graph Convolution Network (GCN) module.
+    Implements diffusion graph convolution.
+    """
+
+    def __init__(self, c_in, c_out, dropout, support_len=3, order=2):
+        super(gcn, self).__init__()
+        self.nconv = nconv()
+
+        # Calculate input channels for the linear layer.
+        # (order * support_len + 1) accounts for the original signal
+        # and signals after 'k' diffusion steps for each support matrix.
+        c_in = (order * support_len + 1) * c_in
+        self.mlp = linear(c_in, c_out)
+        self.dropout = dropout
+        self.order = order
+
+    def forward(self, x, support):
+        """
+        x: Input data_old
+        support: List of adjacency matrices (e.g., original, transposed, adaptive)
+        """
+        out = [x]
+
+        # For each support matrix (e.g., forward/backward directed graph)
+        for a in support:
+            x1 = self.nconv(x, a)
+            out.append(x1)
+            # Multi-step diffusion (order k)
+            for k in range(2, self.order + 1):
+                x2 = self.nconv(x1, a)
+                out.append(x2)
+                x1 = x2
+
+        # Concatenate processed signals along the channel dimension
+        h = torch.cat(out, dim=1)
+        # Linear layer (dimensionality reduction and feature mixing)
+        h = self.mlp(h)
+        h = F.dropout(h, self.dropout, training=self.training)
+        return h
 
 class gwnet(nn.Module):
     """
