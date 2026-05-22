@@ -10,3 +10,6 @@ dataset_utils/__pycache__/*
 /garage/
 /tests_and_infernce/
 /utils/
+/TSNE/
+/umap_pacmap/
+/data_grid_10/

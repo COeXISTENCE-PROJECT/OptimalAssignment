@@ -10,7 +10,6 @@ from engine import TrainerGenTTP
 from utilities import (
     load_csv_adj,
     split_file_names,
-    make_subset_loader,
     infer_target_dim_from_batch,
     init_metric_acc,
     update_metric_acc,
@@ -19,6 +18,8 @@ from utilities import (
     set_seed,
     save_learning_curves
 )
+
+from DataLoader_fast import make_subset_loader
 
 
 def build_arg_parser():
@@ -76,6 +77,12 @@ def build_arg_parser():
     parser.add_argument("--blocks", type=int, default=4)
     parser.add_argument("--layers", type=int, default=2)
 
+    #DataLoader args
+    parser.add_argument("--pin_memory", action="store_true")
+    parser.add_argument("--prefetch_factor", type=int, default=4)
+    parser.add_argument("--load_to_ram", action="store_true")
+    parser.add_argument("--group_by_file", action="store_true", default=True)
+
     return parser
 
 
@@ -125,6 +132,12 @@ def main():
         seq_length_a=args.seq_length_a,
         seq_length_y=args.seq_length_y,
         target_nodes=args.num_nodes,
+        pin_memory=device.type == "cuda",
+        persistent_workers=args.num_workers > 0,
+        prefetch_factor=args.prefetch_factor,
+        group_by_file=True,
+        load_to_ram=args.load_to_ram,
+        seed=args.seed,
     )
 
     val_loader = make_subset_loader(
@@ -138,6 +151,12 @@ def main():
         seq_length_a=args.seq_length_a,
         seq_length_y=args.seq_length_y,
         target_nodes=args.num_nodes,
+        pin_memory=device.type == "cuda",
+        persistent_workers=args.num_workers > 0,
+        prefetch_factor=args.prefetch_factor,
+        group_by_file=True,
+        load_to_ram=args.load_to_ram,
+        seed=args.seed,
     )
 
     test_loader = make_subset_loader(
@@ -151,6 +170,12 @@ def main():
         seq_length_a=args.seq_length_a,
         seq_length_y=args.seq_length_y,
         target_nodes=args.num_nodes,
+        pin_memory=device.type == "cuda",
+        persistent_workers=args.num_workers > 0,
+        prefetch_factor=args.prefetch_factor,
+        group_by_file=True,
+        load_to_ram=args.load_to_ram,
+        seed=args.seed,
     )
 
     print("train dataset size:", len(train_loader.dataset))

@@ -78,7 +78,7 @@ class TrainerGenTTP:
         self.clip = 5
 
     def _prepare_target(self, pred, real_val):
-        real = real_val.to(self.device)
+        real = real_val.to(self.device, non_blocking=True)
 
         if real.shape != pred.shape:
             real = real.reshape_as(pred)
@@ -93,12 +93,12 @@ class TrainerGenTTP:
         q, a, real_val, lengths = unpack_batch(
             batch_or_q, a=a, real_val=real_val, lengths=lengths
         )
-        q = q.to(self.device)
-        a = a.to(self.device)
-        real_val = real_val.to(self.device)
+        q = q.to(self.device, non_blocking=True)
+        a = a.to(self.device, non_blocking=True)
+        real_val = real_val.to(self.device, non_blocking=True)
 
         if lengths is not None:
-            lengths = lengths.to(self.device)
+            lengths = lengths.to(self.device, non_blocking = True)
 
         pred = self.model(q, a, lengths=lengths)
 
@@ -125,12 +125,12 @@ class TrainerGenTTP:
             batch_or_q, a=a, real_val=real_val, lengths=lengths
         )
 
-        q = q.to(self.device)
-        a = a.to(self.device)
-        real_val = real_val.to(self.device)
+        q = q.to(self.device, non_blocking=True)
+        a = a.to(self.device, non_blocking=True)
+        real_val = real_val.to(self.device, non_blocking=True)
 
         if lengths is not None:
-            lengths = lengths.to(self.device)
+            lengths = lengths.to(self.device, non_blocking=True)
 
         pred = self.model(q, a, lengths=lengths)
 
