@@ -1,0 +1,87 @@
+#!/bin/bash
+#SBATCH --job-name=prepare_10k_dataset
+#SBATCH --partition=rknodes
+#SBATCH --nodelist=bonk
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=32G
+#SBATCH --output=slurm-%j.out
+#SBATCH --qos=big_bonk
+
+set -euo pipefail
+
+PYTHON=/home/drozd/miniconda/envs/wavenet_env/bin/python
+
+mkdir -p /scratch/tmp/drozd/dim_red_dataset
+
+$PYTHON <<'PY'
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+import csv
+import re
+import numpy as np
+
+ROOT = Path("/scratch/tmp/4k_dirichlet")
+ASSIGN_DIR = ROOT / "new_assignments_10s"
+FLOW_DIR = ROOT / "new_flows_10s"
+
+OUT_DIR = Path("/scratch/tmp/drozd/4k_dirichlet_dataset")
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+OUT_CSV = OUT_DIR / "dataset_assignment_ttt_manifest.csv"
+
+DT = 10.0
+NUM_WORKERS = 32
+
+def exp_id(path: Path) -> int:
+    return int(re.search(r"exp_(\d+)\.npy$", path.name).group(1))
+
+def shape_str(shape):
+    return "x".join(map(str, shape))
+
+def process_one(a_path):
+    i = exp_id(a_path)
+    f_path = FLOW_DIR / f"exp_{i}.npy"
+
+    if not f_path.exists():
+        return None
+
+    assignment = np.load(a_path, mmap_mode="r")
+    flow = np.load(f_path, mmap_mode="r")
+
+    total_travel_time = float(flow.sum(dtype=np.float64) * DT)
+
+    return {
+        "exp_id": i,
+        "assignment_path": str(a_path),
+        "flow_path": str(f_path),
+        "assignment_shape": shape_str(assignment.shape),
+        "flow_shape": shape_str(flow.shape),
+        "total_travel_time": total_travel_time,
+    }
+
+assignment_files = sorted(ASSIGN_DIR.glob("exp_*.npy"), key=exp_id)
+
+with ThreadPoolExecutor(max_workers=NUM_WORKERS) as ex:
+    rows = list(ex.map(process_one, assignment_files))
+
+rows = [r for r in rows if r is not None]
+rows = sorted(rows, key=lambda r: r["exp_id"])
+
+with open(OUT_CSV, "w", newline="") as f:
+    writer = csv.DictWriter(
+        f,
+        fieldnames=[
+            "exp_id",
+            "assignment_path",
+            "flow_path",
+            "assignment_shape",
+            "flow_shape",
+            "total_travel_time",
+        ],
+    )
+    writer.writeheader()
+    writer.writerows(rows)
+
+print(f"Saved: {OUT_CSV}")
+print(f"Samples: {len(rows)}")
+PY

@@ -1,0 +1,109 @@
+#!/bin/bash
+#SBATCH --job-name=tsne3d_interactive
+#SBATCH --partition=rknodes
+#SBATCH --nodelist=bonk
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=16G
+#SBATCH --output=slurm-%j.out
+#SBATCH --qos=big_bonk
+
+set -euo pipefail
+
+PYTHON=/home/drozd/miniconda/envs/wavenet_env/bin/python
+
+$PYTHON <<'PY'
+from pathlib import Path
+import pandas as pd
+
+try:
+    import plotly.express as px
+except ModuleNotFoundError:
+    raise SystemExit(
+        "Brakuje plotly w środowisku. Zainstaluj:\n"
+        "/home/drozd/miniconda/envs/wavenet_env/bin/python -m pip install plotly"
+    )
+
+TSNE_DIR = Path("/scratch/tmp/drozd/4k_dirichlet_dataset/tsne_3d")
+MANIFEST = Path("/scratch/tmp/drozd/4k_dirichlet_dataset/dataset_assignment_ttt_manifest.csv")
+
+# Konkretna ścieżka z poprzedniego skryptu
+IN_CSV = TSNE_DIR / "tsne_assignment_metric.csv"
+
+# Jeśli plik o tej nazwie nie istnieje, weź najnowszy pasujący CSV
+if not IN_CSV.exists():
+    candidates = sorted(
+        TSNE_DIR.glob("tsne3d_assignment_bins*_perp*.csv"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not candidates:
+        raise FileNotFoundError(f"No tsne3d CSV found in {TSNE_DIR}")
+    IN_CSV = candidates[0]
+
+OUT_HTML = IN_CSV.with_suffix(".interactive.html")
+
+df = pd.read_csv(IN_CSV)
+
+# Opcjonalnie dodaj ścieżkę assignmentu do hovera
+if MANIFEST.exists():
+    manifest = pd.read_csv(MANIFEST)
+    keep_cols = ["exp_id", "assignment_path", "flow_path", "assignment_shape"]
+    keep_cols = [c for c in keep_cols if c in manifest.columns]
+
+    df = df.merge(
+        manifest[keep_cols],
+        on="exp_id",
+        how="left",
+    )
+
+df["exp_id_str"] = df["exp_id"].astype(str)
+
+hover_data = {
+    "exp_id_str": True,
+    "total_travel_time": ":.2f",
+    "x": ":.3f",
+    "y": ":.3f",
+    "z": ":.3f",
+}
+
+for col in ["assignment_shape", "assignment_path", "flow_path"]:
+    if col in df.columns:
+        hover_data[col] = True
+
+fig = px.scatter_3d(
+    df,
+    x="x",
+    y="y",
+    z="z",
+    color="total_travel_time",
+    hover_data=hover_data,
+    title=f"3D assignment-based t-SNE colored by total travel time<br>{IN_CSV.name}",
+    color_continuous_scale="Viridis",
+)
+
+fig.update_traces(
+    marker=dict(
+        size=3,
+        opacity=0.75,
+    )
+)
+
+fig.update_layout(
+    scene=dict(
+        xaxis_title="t-SNE 1",
+        yaxis_title="t-SNE 2",
+        zaxis_title="t-SNE 3",
+    ),
+    width=1200,
+    height=900,
+)
+
+fig.write_html(
+    OUT_HTML,
+    include_plotlyjs=True,
+    full_html=True,
+)
+
+print("Input CSV:", IN_CSV)
+print("Saved interactive HTML:", OUT_HTML)
+PY

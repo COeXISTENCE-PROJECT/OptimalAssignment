@@ -1,0 +1,875 @@
+#!/bin/bash
+#SBATCH --job-name=umap_pacmap_2d_3d_assignment
+#SBATCH --partition=rknodes
+#SBATCH --nodelist=bonk
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
+#SBATCH --output=slurm-%j.out
+#SBATCH --qos=big_bonk
+
+set -euo pipefail
+
+PYTHON=/home/drozd/miniconda/envs/wavenet_env/bin/python
+
+$PYTHON <<'PY'
+from pathlib import Path
+import csv
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+import plotly.express as px
+
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+
+try:
+    import umap
+except ImportError as e:
+    raise ImportError(
+        "Brakuje pakietu umap-learn. Zainstaluj: pip install umap-learn"
+    ) from e
+
+try:
+    import pacmap
+except ImportError as e:
+    raise ImportError(
+        "Brakuje pakietu pacmap. Zainstaluj: pip install pacmap"
+    ) from e
+
+
+# ============================================================
+# Paths
+# ============================================================
+
+MANIFEST = Path("/scratch/tmp/drozd/10k_grid_dataset/dataset_assignment_ttt_manifest.csv")
+OUT_DIR = Path("/scratch/tmp/drozd/10k_grid_dataset/umap_pacmap_2d_3d")
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# ============================================================
+# Parameters
+# ============================================================
+
+BINS = 200
+PCA_DIM = 100
+RANDOM_STATE = 42
+N_CLUSTERS = 8
+
+# UMAP
+UMAP_N_NEIGHBORS = 50
+UMAP_MIN_DIST = 0.05
+UMAP_METRIC = "euclidean"
+
+# PaCMAP
+PACMAP_N_NEIGHBORS = 50
+PACMAP_MN_RATIO = 0.5
+PACMAP_FP_RATIO = 2.0
+PACMAP_METRIC = "euclidean"
+
+# Plotting
+POINT_SIZE_2D = 8
+POINT_SIZE_3D_STATIC = 8
+POINT_SIZE_3D_INTERACTIVE = 3
+ALPHA = 0.85
+
+
+# ============================================================
+# Data utilities
+# ============================================================
+
+def parse_shape(s):
+    return tuple(map(int, s.split("x")))
+
+
+def load_manifest(path):
+    rows = []
+
+    with open(path, newline="") as f:
+        reader = csv.DictReader(f)
+
+        for r in reader:
+            rows.append({
+                "exp_id": int(r["exp_id"]),
+                "assignment_path": r["assignment_path"],
+                "assignment_shape": parse_shape(r["assignment_shape"]),
+                "total_travel_time": float(r["total_travel_time"]),
+            })
+
+    return rows
+
+
+def detect_time_axis(shapes):
+    dim0 = [s[0] for s in shapes]
+    dim1 = [s[1] for s in shapes]
+
+    dim0_var = len(set(dim0))
+    dim1_var = len(set(dim1))
+
+    if dim0_var == 1 and dim1_var > 1:
+        return 1
+
+    if dim1_var == 1 and dim0_var > 1:
+        return 0
+
+    if dim0_var == 1 and dim1_var == 1:
+        shape = shapes[0]
+
+        if shape[1] == BINS:
+            return 1
+
+        if shape[0] == BINS:
+            return 0
+
+        print(
+            f"Warning: both axes are constant, shape={shape}. "
+            f"Assuming time_axis=1, i.e. matrix is N x T."
+        )
+        return 1
+
+    raise ValueError(
+        f"Cannot detect time axis. "
+        f"unique dim0={dim0_var}, unique dim1={dim1_var}"
+    )
+
+
+def bin_time(mat, time_axis, bins):
+    """
+    Input:
+        mat: assignment matrix
+    Output:
+        N x bins
+
+    Zakładamy, że po ewentualnej transpozycji:
+        N = liczba ścieżek / agentów / relacji
+        T = liczba kroków czasu
+    """
+    if time_axis == 0:
+        mat = mat.T
+
+    n_rows, T = mat.shape
+    out = np.zeros((n_rows, bins), dtype=np.float32)
+
+    splits = np.array_split(np.arange(T), bins)
+
+    for j, idx in enumerate(splits):
+        if len(idx) > 0:
+            out[:, j] = mat[:, idx].sum(axis=1)
+
+    return out
+
+
+def make_assignment_features(rows, time_axis):
+    X = []
+
+    for k, r in enumerate(rows):
+        a = np.load(r["assignment_path"], mmap_mode="r")
+        binned = bin_time(a, time_axis=time_axis, bins=BINS)
+
+        # Surowe wartości.
+        feat = binned.ravel()
+
+        # Alternatywa, jeśli wartości mają duży zakres:
+        # feat = np.log1p(binned).ravel()
+
+        X.append(feat)
+
+        if (k + 1) % 500 == 0:
+            print(f"Loaded assignment features: {k + 1}/{len(rows)}")
+
+    return np.stack(X).astype(np.float32)
+
+
+# ============================================================
+# Models
+# ============================================================
+
+def run_kmeans(X):
+    print("Running KMeans...")
+    print(f"KMeans input shape: {X.shape}")
+    print(f"KMeans n_clusters: {N_CLUSTERS}")
+
+    try:
+        labels = KMeans(
+            n_clusters=N_CLUSTERS,
+            random_state=RANDOM_STATE,
+            n_init="auto",
+        ).fit_predict(X)
+    except TypeError:
+        labels = KMeans(
+            n_clusters=N_CLUSTERS,
+            random_state=RANDOM_STATE,
+            n_init=10,
+        ).fit_predict(X)
+
+    return labels.astype(int)
+
+
+def run_umap(X, n_components, title_prefix):
+    n_neighbors = min(UMAP_N_NEIGHBORS, X.shape[0] - 1)
+
+    print(f"Running UMAP: {title_prefix}")
+    print(f"UMAP input shape: {X.shape}")
+    print(f"UMAP n_components: {n_components}")
+    print(f"UMAP n_neighbors: {n_neighbors}")
+    print(f"UMAP min_dist: {UMAP_MIN_DIST}")
+    print(f"UMAP metric: {UMAP_METRIC}")
+
+    reducer = umap.UMAP(
+        n_components=n_components,
+        n_neighbors=n_neighbors,
+        min_dist=UMAP_MIN_DIST,
+        metric=UMAP_METRIC,
+        random_state=RANDOM_STATE,
+        verbose=True,
+    )
+
+    emb = reducer.fit_transform(X)
+    return np.asarray(emb, dtype=np.float32)
+
+
+def run_pacmap(X, n_components, title_prefix):
+    n_neighbors = min(PACMAP_N_NEIGHBORS, X.shape[0] - 1)
+
+    print(f"Running PaCMAP: {title_prefix}")
+    print(f"PaCMAP input shape: {X.shape}")
+    print(f"PaCMAP n_components: {n_components}")
+    print(f"PaCMAP n_neighbors: {n_neighbors}")
+    print(f"PaCMAP MN_ratio: {PACMAP_MN_RATIO}")
+    print(f"PaCMAP FP_ratio: {PACMAP_FP_RATIO}")
+    print(f"PaCMAP metric: {PACMAP_METRIC}")
+
+    try:
+        reducer = pacmap.PaCMAP(
+            n_components=n_components,
+            n_neighbors=n_neighbors,
+            MN_ratio=PACMAP_MN_RATIO,
+            FP_ratio=PACMAP_FP_RATIO,
+            distance=PACMAP_METRIC,
+            random_state=RANDOM_STATE,
+            apply_pca=False,
+            verbose=True,
+        )
+    except TypeError:
+        try:
+            reducer = pacmap.PaCMAP(
+                n_components=n_components,
+                n_neighbors=n_neighbors,
+                MN_ratio=PACMAP_MN_RATIO,
+                FP_ratio=PACMAP_FP_RATIO,
+                distance=PACMAP_METRIC,
+                random_state=RANDOM_STATE,
+                apply_pca=False,
+            )
+        except TypeError:
+            reducer = pacmap.PaCMAP(
+                n_components=n_components,
+                n_neighbors=n_neighbors,
+                MN_ratio=PACMAP_MN_RATIO,
+                FP_ratio=PACMAP_FP_RATIO,
+                distance=PACMAP_METRIC,
+            )
+
+    # PCA init działa tylko wtedy, gdy liczba cech >= liczba komponentów.
+    init_mode = "pca" if X.shape[1] >= n_components else "random"
+    print(f"PaCMAP init mode: {init_mode}")
+
+    try:
+        emb = reducer.fit_transform(X, init=init_mode)
+    except TypeError:
+        emb = reducer.fit_transform(X)
+
+    return np.asarray(emb, dtype=np.float32)
+
+
+# ============================================================
+# Saving
+# ============================================================
+
+def save_embedding_csv(path, rows, emb, clusters=None):
+    fieldnames = ["exp_id", "x", "y"]
+
+    if emb.shape[1] >= 3:
+        fieldnames.append("z")
+
+    fieldnames.append("total_travel_time")
+
+    if clusters is not None:
+        fieldnames.append("cluster")
+
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for i, r in enumerate(rows):
+            row = {
+                "exp_id": r["exp_id"],
+                "x": float(emb[i, 0]),
+                "y": float(emb[i, 1]),
+                "total_travel_time": r["total_travel_time"],
+            }
+
+            if emb.shape[1] >= 3:
+                row["z"] = float(emb[i, 2])
+
+            if clusters is not None:
+                row["cluster"] = int(clusters[i])
+
+            writer.writerow(row)
+
+
+def save_cluster_summary(path, y, clusters):
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "cluster",
+                "count",
+                "tt_mean",
+                "tt_median",
+                "tt_min",
+                "tt_max",
+            ],
+        )
+        writer.writeheader()
+
+        for c in sorted(set(clusters)):
+            vals = y[clusters == c]
+
+            writer.writerow({
+                "cluster": int(c),
+                "count": int(len(vals)),
+                "tt_mean": float(vals.mean()),
+                "tt_median": float(np.median(vals)),
+                "tt_min": float(vals.min()),
+                "tt_max": float(vals.max()),
+            })
+
+
+def save_pca_summary(path, pca):
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "component",
+                "explained_variance_ratio",
+                "cumulative_explained_variance_ratio",
+            ],
+        )
+        writer.writeheader()
+
+        cumulative = np.cumsum(pca.explained_variance_ratio_)
+
+        for i, (evr, cum) in enumerate(zip(pca.explained_variance_ratio_, cumulative), start=1):
+            writer.writerow({
+                "component": i,
+                "explained_variance_ratio": float(evr),
+                "cumulative_explained_variance_ratio": float(cum),
+            })
+
+
+# ============================================================
+# Static matplotlib plots
+# ============================================================
+
+def plot_embedding_2d_static_ttt(path, emb, y, title, xlabel, ylabel):
+    plt.figure(figsize=(9, 7))
+
+    sc = plt.scatter(
+        emb[:, 0],
+        emb[:, 1],
+        c=y,
+        s=POINT_SIZE_2D,
+        alpha=ALPHA,
+    )
+
+    plt.colorbar(sc, label="total travel time")
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.tight_layout()
+    plt.savefig(path, dpi=200)
+    plt.close()
+
+
+def plot_embedding_2d_static_cluster(path, emb, clusters, title, xlabel, ylabel):
+    plt.figure(figsize=(9, 7))
+
+    sc = plt.scatter(
+        emb[:, 0],
+        emb[:, 1],
+        c=clusters,
+        s=POINT_SIZE_2D,
+        alpha=ALPHA,
+    )
+
+    plt.colorbar(sc, label="cluster")
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.tight_layout()
+    plt.savefig(path, dpi=200)
+    plt.close()
+
+
+def plot_embedding_3d_static_ttt(path, emb, y, title):
+    if emb.shape[1] < 3:
+        raise ValueError(f"3D plot requires embedding with 3 dimensions, got shape={emb.shape}")
+
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection="3d")
+
+    sc = ax.scatter(
+        emb[:, 0],
+        emb[:, 1],
+        emb[:, 2],
+        c=y,
+        s=POINT_SIZE_3D_STATIC,
+        alpha=ALPHA,
+    )
+
+    fig.colorbar(sc, ax=ax, label="total travel time")
+
+    ax.set_title(title)
+    ax.set_xlabel("component 1")
+    ax.set_ylabel("component 2")
+    ax.set_zlabel("component 3")
+
+    plt.tight_layout()
+    plt.savefig(path, dpi=200)
+    plt.close()
+
+
+def plot_embedding_3d_static_cluster(path, emb, clusters, title):
+    if emb.shape[1] < 3:
+        raise ValueError(f"3D plot requires embedding with 3 dimensions, got shape={emb.shape}")
+
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection="3d")
+
+    sc = ax.scatter(
+        emb[:, 0],
+        emb[:, 1],
+        emb[:, 2],
+        c=clusters,
+        s=POINT_SIZE_3D_STATIC,
+        alpha=ALPHA,
+    )
+
+    fig.colorbar(sc, ax=ax, label="cluster")
+
+    ax.set_title(title)
+    ax.set_xlabel("component 1")
+    ax.set_ylabel("component 2")
+    ax.set_zlabel("component 3")
+
+    plt.tight_layout()
+    plt.savefig(path, dpi=200)
+    plt.close()
+
+
+# ============================================================
+# Interactive plotly plots
+# ============================================================
+
+def make_interactive_df(rows, emb, y, clusters=None):
+    data = {
+        "exp_id": [r["exp_id"] for r in rows],
+        "component_1": emb[:, 0],
+        "component_2": emb[:, 1],
+        "total_travel_time": y,
+    }
+
+    if emb.shape[1] >= 3:
+        data["component_3"] = emb[:, 2]
+
+    if clusters is not None:
+        data["cluster"] = clusters.astype(str)
+
+    return pd.DataFrame(data)
+
+
+def plot_embedding_2d_interactive_ttt(path, rows, emb, y, clusters, title):
+    df = make_interactive_df(rows, emb, y, clusters=clusters)
+
+    fig = px.scatter(
+        df,
+        x="component_1",
+        y="component_2",
+        color="total_travel_time",
+        hover_data=["exp_id", "total_travel_time", "cluster"],
+        title=title,
+        render_mode="webgl",
+    )
+
+    fig.update_traces(
+        marker=dict(
+            size=5,
+            opacity=ALPHA,
+        )
+    )
+
+    fig.update_layout(
+        xaxis_title="component 1",
+        yaxis_title="component 2",
+    )
+
+    fig.write_html(str(path), include_plotlyjs=True, full_html=True)
+
+
+def plot_embedding_2d_interactive_cluster(path, rows, emb, y, clusters, title):
+    df = make_interactive_df(rows, emb, y, clusters=clusters)
+
+    fig = px.scatter(
+        df,
+        x="component_1",
+        y="component_2",
+        color="cluster",
+        hover_data=["exp_id", "total_travel_time", "cluster"],
+        title=title,
+        render_mode="webgl",
+    )
+
+    fig.update_traces(
+        marker=dict(
+            size=5,
+            opacity=ALPHA,
+        )
+    )
+
+    fig.update_layout(
+        xaxis_title="component 1",
+        yaxis_title="component 2",
+    )
+
+    fig.write_html(str(path), include_plotlyjs=True, full_html=True)
+
+
+def plot_embedding_3d_interactive_ttt(path, rows, emb, y, clusters, title):
+    df = make_interactive_df(rows, emb, y, clusters=clusters)
+
+    fig = px.scatter_3d(
+        df,
+        x="component_1",
+        y="component_2",
+        z="component_3",
+        color="total_travel_time",
+        hover_data=["exp_id", "total_travel_time", "cluster"],
+        title=title,
+    )
+
+    fig.update_traces(
+        marker=dict(
+            size=POINT_SIZE_3D_INTERACTIVE,
+            opacity=ALPHA,
+        )
+    )
+
+    fig.update_layout(
+        scene=dict(
+            xaxis_title="component 1",
+            yaxis_title="component 2",
+            zaxis_title="component 3",
+        )
+    )
+
+    fig.write_html(str(path), include_plotlyjs=True, full_html=True)
+
+
+def plot_embedding_3d_interactive_cluster(path, rows, emb, y, clusters, title):
+    df = make_interactive_df(rows, emb, y, clusters=clusters)
+
+    fig = px.scatter_3d(
+        df,
+        x="component_1",
+        y="component_2",
+        z="component_3",
+        color="cluster",
+        hover_data=["exp_id", "total_travel_time", "cluster"],
+        title=title,
+    )
+
+    fig.update_traces(
+        marker=dict(
+            size=POINT_SIZE_3D_INTERACTIVE,
+            opacity=ALPHA,
+        )
+    )
+
+    fig.update_layout(
+        scene=dict(
+            xaxis_title="component 1",
+            yaxis_title="component 2",
+            zaxis_title="component 3",
+        )
+    )
+
+    fig.write_html(str(path), include_plotlyjs=True, full_html=True)
+
+
+# ============================================================
+# Pipeline helpers
+# ============================================================
+
+def save_all_2d_outputs(method_name, emb, rows, y, clusters):
+    """
+    method_name: np. "umap_assignment_2d" albo "pacmap_assignment_2d"
+    """
+    method_title = method_name.replace("_", " ").upper()
+
+    save_embedding_csv(
+        OUT_DIR / f"{method_name}_metric.csv",
+        rows,
+        emb,
+        clusters=clusters,
+    )
+
+    plot_embedding_2d_static_ttt(
+        OUT_DIR / f"{method_name}_colored_by_ttt.png",
+        emb,
+        y,
+        f"{method_title} colored by total travel time",
+        "component 1",
+        "component 2",
+    )
+
+    plot_embedding_2d_static_cluster(
+        OUT_DIR / f"{method_name}_colored_by_cluster.png",
+        emb,
+        clusters,
+        f"{method_title} colored by KMeans cluster",
+        "component 1",
+        "component 2",
+    )
+
+    plot_embedding_2d_interactive_ttt(
+        OUT_DIR / f"{method_name}_interactive_colored_by_ttt.html",
+        rows,
+        emb,
+        y,
+        clusters,
+        f"{method_title} colored by total travel time",
+    )
+
+    plot_embedding_2d_interactive_cluster(
+        OUT_DIR / f"{method_name}_interactive_colored_by_cluster.html",
+        rows,
+        emb,
+        y,
+        clusters,
+        f"{method_title} colored by KMeans cluster",
+    )
+
+
+def save_all_3d_outputs(method_name, emb, rows, y, clusters):
+    """
+    method_name: np. "umap_assignment_3d" albo "pacmap_assignment_3d"
+    """
+    method_title = method_name.replace("_", " ").upper()
+
+    save_embedding_csv(
+        OUT_DIR / f"{method_name}_metric.csv",
+        rows,
+        emb,
+        clusters=clusters,
+    )
+
+    plot_embedding_3d_static_ttt(
+        OUT_DIR / f"{method_name}_colored_by_ttt.png",
+        emb,
+        y,
+        f"{method_title} colored by total travel time",
+    )
+
+    plot_embedding_3d_static_cluster(
+        OUT_DIR / f"{method_name}_colored_by_cluster.png",
+        emb,
+        clusters,
+        f"{method_title} colored by KMeans cluster",
+    )
+
+    plot_embedding_3d_interactive_ttt(
+        OUT_DIR / f"{method_name}_interactive_colored_by_ttt.html",
+        rows,
+        emb,
+        y,
+        clusters,
+        f"{method_title} colored by total travel time",
+    )
+
+    plot_embedding_3d_interactive_cluster(
+        OUT_DIR / f"{method_name}_interactive_colored_by_cluster.html",
+        rows,
+        emb,
+        y,
+        clusters,
+        f"{method_title} colored by KMeans cluster",
+    )
+
+
+# ============================================================
+# Main
+# ============================================================
+
+print("Loading manifest...")
+rows = load_manifest(MANIFEST)
+rows = sorted(rows, key=lambda r: r["exp_id"])
+
+y = np.array([r["total_travel_time"] for r in rows], dtype=np.float64)
+shapes = [r["assignment_shape"] for r in rows]
+
+print(f"Samples: {len(rows)}")
+print(f"TT min/mean/max: {y.min():.3f} / {y.mean():.3f} / {y.max():.3f}")
+
+time_axis = detect_time_axis(shapes)
+print(f"Detected time axis: {time_axis}")
+
+print("Building assignment feature matrix...")
+X = make_assignment_features(rows, time_axis=time_axis)
+
+print("Raw feature matrix:", X.shape)
+
+print("Scaling...")
+X_scaled = StandardScaler().fit_transform(X).astype(np.float32)
+
+pca_dim = min(PCA_DIM, X_scaled.shape[0] - 1, X_scaled.shape[1])
+
+print("Running PCA...")
+print(f"PCA input shape: {X_scaled.shape}")
+print(f"PCA n_components: {pca_dim}")
+
+pca = PCA(
+    n_components=pca_dim,
+    random_state=RANDOM_STATE,
+)
+
+X_pca = pca.fit_transform(X_scaled).astype(np.float32)
+
+print("PCA feature matrix:", X_pca.shape)
+print(f"PCA explained variance ratio sum: {pca.explained_variance_ratio_.sum():.4f}")
+
+save_pca_summary(
+    OUT_DIR / "pca_explained_variance.csv",
+    pca,
+)
+
+clusters = run_kmeans(X_pca)
+
+save_cluster_summary(
+    OUT_DIR / "cluster_ttt_summary.csv",
+    y,
+    clusters,
+)
+
+
+# ============================================================
+# UMAP 2D
+# ============================================================
+
+emb_umap_2d = run_umap(
+    X_pca,
+    n_components=2,
+    title_prefix="assignment-based 2D",
+)
+
+save_all_2d_outputs(
+    method_name="umap_assignment_2d",
+    emb=emb_umap_2d,
+    rows=rows,
+    y=y,
+    clusters=clusters,
+)
+
+
+# ============================================================
+# UMAP 3D
+# ============================================================
+
+emb_umap_3d = run_umap(
+    X_pca,
+    n_components=3,
+    title_prefix="assignment-based 3D",
+)
+
+save_all_3d_outputs(
+    method_name="umap_assignment_3d",
+    emb=emb_umap_3d,
+    rows=rows,
+    y=y,
+    clusters=clusters,
+)
+
+
+# ============================================================
+# PaCMAP 2D
+# ============================================================
+
+emb_pacmap_2d = run_pacmap(
+    X_pca,
+    n_components=2,
+    title_prefix="assignment-based 2D",
+)
+
+save_all_2d_outputs(
+    method_name="pacmap_assignment_2d",
+    emb=emb_pacmap_2d,
+    rows=rows,
+    y=y,
+    clusters=clusters,
+)
+
+
+# ============================================================
+# PaCMAP 3D
+# ============================================================
+
+emb_pacmap_3d = run_pacmap(
+    X_pca,
+    n_components=3,
+    title_prefix="assignment-based 3D",
+)
+
+save_all_3d_outputs(
+    method_name="pacmap_assignment_3d",
+    emb=emb_pacmap_3d,
+    rows=rows,
+    y=y,
+    clusters=clusters,
+)
+
+
+# ============================================================
+# Summary
+# ============================================================
+
+print("Saved outputs to:", OUT_DIR)
+
+print("CSV files:")
+print(" - pca_explained_variance.csv")
+print(" - cluster_ttt_summary.csv")
+print(" - umap_assignment_2d_metric.csv")
+print(" - umap_assignment_3d_metric.csv")
+print(" - pacmap_assignment_2d_metric.csv")
+print(" - pacmap_assignment_3d_metric.csv")
+
+print("Static PNG files:")
+print(" - umap_assignment_2d_colored_by_ttt.png")
+print(" - umap_assignment_2d_colored_by_cluster.png")
+print(" - umap_assignment_3d_colored_by_ttt.png")
+print(" - umap_assignment_3d_colored_by_cluster.png")
+print(" - pacmap_assignment_2d_colored_by_ttt.png")
+print(" - pacmap_assignment_2d_colored_by_cluster.png")
+print(" - pacmap_assignment_3d_colored_by_ttt.png")
+print(" - pacmap_assignment_3d_colored_by_cluster.png")
+
+print("Interactive HTML files:")
+print(" - umap_assignment_2d_interactive_colored_by_ttt.html")
+print(" - umap_assignment_2d_interactive_colored_by_cluster.html")
+print(" - umap_assignment_3d_interactive_colored_by_ttt.html")
+print(" - umap_assignment_3d_interactive_colored_by_cluster.html")
+print(" - pacmap_assignment_2d_interactive_colored_by_ttt.html")
+print(" - pacmap_assignment_2d_interactive_colored_by_cluster.html")
+print(" - pacmap_assignment_3d_interactive_colored_by_ttt.html")
+print(" - pacmap_assignment_3d_interactive_colored_by_cluster.html")
+
+PY

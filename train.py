@@ -60,7 +60,7 @@ def build_arg_parser():
 
     # Model architecture
     parser.add_argument("--sequence_model", type=str, default="gru", choices=["lstm", "gru", "attention"])
-    parser.add_argument("--fuse_method", type=str, default="attention", choices=["concatenate", "attention", "wavenet_only", "assignment_only"],)
+    parser.add_argument("--fuse_method", type=str, default="attention", choices=["concatenate", "attention", "wavenet_only", "assignment_only", "hadamard"],)
 
     parser.add_argument("--nhid", type=int, default=32)
     parser.add_argument("--fused_dim", type=int, default=64)

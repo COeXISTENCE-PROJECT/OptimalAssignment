@@ -1,0 +1,228 @@
+#!/bin/bash
+#SBATCH --job-name=pca_10k_assignment
+#SBATCH --partition=rknodes
+#SBATCH --nodelist=bonk
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
+#SBATCH --output=slurm-%j.out
+#SBATCH --qos=big_bonk
+
+set -euo pipefail
+
+export OMP_NUM_THREADS=16
+export MKL_NUM_THREADS=16
+export OPENBLAS_NUM_THREADS=16
+export NUMEXPR_NUM_THREADS=16
+export MPLBACKEND=Agg
+
+PYTHON=/home/drozd/miniconda/envs/wavenet_env/bin/python
+
+$PYTHON <<'PY'
+from pathlib import Path
+import csv
+import numpy as np
+import matplotlib.pyplot as plt
+
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+
+MANIFEST = Path("/scratch/tmp/drozd/10k_grid_dataset/dataset_assignment_ttt_manifest.csv")
+OUT_DIR = Path("/scratch/tmp/drozd/10k_grid_dataset/pca")
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+BINS = 200
+USE_LOG1P = True
+N_COMPONENTS = 500
+
+OUT_CSV = OUT_DIR / f"pca_assignment_bins{BINS}.csv"
+OUT_2D = OUT_DIR / f"pca_assignment_bins{BINS}_pc1_pc2_colored_by_ttt.png"
+OUT_3D = OUT_DIR / f"pca_assignment_bins{BINS}_pc1_pc2_pc3_colored_by_ttt.png"
+OUT_VAR = OUT_DIR / f"pca_assignment_bins{BINS}_explained_variance.csv"
+
+def parse_shape(s):
+    return tuple(map(int, s.split("x")))
+
+def load_manifest(path):
+    rows = []
+
+    with open(path, newline="") as f:
+        reader = csv.DictReader(f)
+
+        for r in reader:
+            rows.append({
+                "exp_id": int(r["exp_id"]),
+                "assignment_path": r["assignment_path"],
+                "assignment_shape": parse_shape(r["assignment_shape"]),
+                "total_travel_time": float(r["total_travel_time"]),
+            })
+
+    return sorted(rows, key=lambda r: r["exp_id"])
+
+def detect_time_axis(shapes):
+    dim0 = [s[0] for s in shapes]
+    dim1 = [s[1] for s in shapes]
+
+    if len(set(dim0)) == 1 and len(set(dim1)) > 1:
+        return 1  # N x T
+
+    if len(set(dim1)) == 1 and len(set(dim0)) > 1:
+        return 0  # T x N
+
+    raise ValueError(
+        f"Cannot detect time axis: "
+        f"unique dim0={len(set(dim0))}, unique dim1={len(set(dim1))}"
+    )
+
+def bin_time(mat, time_axis, bins):
+    if time_axis == 0:
+        mat = mat.T
+
+    # mat is now N x T
+    N, T = mat.shape
+    out = np.zeros((N, bins), dtype=np.float32)
+
+    splits = np.array_split(np.arange(T), bins)
+
+    for j, idx in enumerate(splits):
+        if len(idx) > 0:
+            out[:, j] = mat[:, idx].sum(axis=1)
+
+    return out
+
+def make_features(rows, time_axis):
+    X = []
+
+    for i, r in enumerate(rows):
+        a = np.load(r["assignment_path"], mmap_mode="r")
+        binned = bin_time(a, time_axis=time_axis, bins=BINS)
+
+        if USE_LOG1P:
+            feat = np.log1p(binned).ravel()
+        else:
+            feat = binned.ravel()
+
+        X.append(feat)
+
+        if (i + 1) % 500 == 0:
+            print(f"Loaded {i + 1}/{len(rows)}", flush=True)
+
+    return np.stack(X).astype(np.float32)
+
+rows = load_manifest(MANIFEST)
+tt = np.array([r["total_travel_time"] for r in rows], dtype=np.float64)
+
+print(f"Samples: {len(rows)}", flush=True)
+print(f"TT min/mean/max: {tt.min():.3f} / {tt.mean():.3f} / {tt.max():.3f}", flush=True)
+
+time_axis = detect_time_axis([r["assignment_shape"] for r in rows])
+print(f"Detected time axis: {time_axis}", flush=True)
+
+X = make_features(rows, time_axis=time_axis)
+print("Raw feature matrix:", X.shape, flush=True)
+
+X_scaled = StandardScaler().fit_transform(X)
+
+pca = PCA(
+    n_components=N_COMPONENTS,
+    random_state=42,
+)
+
+Z = pca.fit_transform(X_scaled)
+
+print("PCA embedding shape:", Z.shape, flush=True)
+print("Explained variance ratio:", pca.explained_variance_ratio_, flush=True)
+print("Cumulative explained variance:", np.cumsum(pca.explained_variance_ratio_), flush=True)
+
+with open(OUT_CSV, "w", newline="") as f:
+    writer = csv.DictWriter(
+        f,
+        fieldnames=[
+            "exp_id",
+            "pc1",
+            "pc2",
+            "pc3",
+            "total_travel_time",
+        ],
+    )
+    writer.writeheader()
+
+    for i, r in enumerate(rows):
+        writer.writerow({
+            "exp_id": r["exp_id"],
+            "pc1": float(Z[i, 0]),
+            "pc2": float(Z[i, 1]),
+            "pc3": float(Z[i, 2]),
+            "total_travel_time": float(tt[i]),
+        })
+
+with open(OUT_VAR, "w", newline="") as f:
+    writer = csv.DictWriter(
+        f,
+        fieldnames=[
+            "component",
+            "explained_variance",
+            "explained_variance_ratio",
+            "cumulative_explained_variance_ratio",
+        ],
+    )
+    writer.writeheader()
+
+    cumulative = np.cumsum(pca.explained_variance_ratio_)
+
+    for i in range(N_COMPONENTS):
+        writer.writerow({
+            "component": i + 1,
+            "explained_variance": float(pca.explained_variance_[i]),
+            "explained_variance_ratio": float(pca.explained_variance_ratio_[i]),
+            "cumulative_explained_variance_ratio": float(cumulative[i]),
+        })
+
+# 2D PCA plot: PC1 vs PC2
+plt.figure(figsize=(9, 7))
+
+sc = plt.scatter(
+    Z[:, 0],
+    Z[:, 1],
+    c=tt,
+    s=8,
+    alpha=0.85,
+)
+
+plt.colorbar(sc, label="total travel time")
+plt.xlabel(f"PC1 ({pca.explained_variance_ratio_[0] * 100:.2f}% var)")
+plt.ylabel(f"PC2 ({pca.explained_variance_ratio_[1] * 100:.2f}% var)")
+plt.title(f"PCA assignment space, BINS={BINS}, colored by total travel time")
+plt.tight_layout()
+plt.savefig(OUT_2D, dpi=200)
+plt.close()
+
+# 3D PCA plot: PC1 vs PC2 vs PC3
+fig = plt.figure(figsize=(10, 8))
+ax = fig.add_subplot(111, projection="3d")
+
+sc = ax.scatter(
+    Z[:, 0],
+    Z[:, 1],
+    Z[:, 2],
+    c=tt,
+    s=8,
+    alpha=0.85,
+)
+
+fig.colorbar(sc, ax=ax, label="total travel time")
+
+ax.set_xlabel(f"PC1 ({pca.explained_variance_ratio_[0] * 100:.2f}% var)")
+ax.set_ylabel(f"PC2 ({pca.explained_variance_ratio_[1] * 100:.2f}% var)")
+ax.set_zlabel(f"PC3 ({pca.explained_variance_ratio_[2] * 100:.2f}% var)")
+ax.set_title(f"3D PCA assignment space, BINS={BINS}, colored by total travel time")
+
+plt.tight_layout()
+plt.savefig(OUT_3D, dpi=200)
+plt.close()
+
+print("Saved CSV:", OUT_CSV, flush=True)
+print("Saved 2D PCA plot:", OUT_2D, flush=True)
+print("Saved 3D PCA plot:", OUT_3D, flush=True)
+print("Saved explained variance:", OUT_VAR, flush=True)
+PY
+
