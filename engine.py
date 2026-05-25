@@ -34,6 +34,9 @@ class TrainerGenTTP:
         mlp_hidden_dim=64,
         attention_num_heads=4,
         attention_ff_dim=64,
+        fuse_attention_num_heads=4,
+        fuse_attention_ff_dim=None,
+        fuse_gated_update=True,
     ):
         self.device = device
 
@@ -66,6 +69,9 @@ class TrainerGenTTP:
             dropout=dropout,
             attention_num_heads=attention_num_heads,
             attention_ff_dim=attention_ff_dim,
+            fuse_attention_num_heads=fuse_attention_num_heads,
+            fuse_attention_ff_dim=fuse_attention_ff_dim,
+            fuse_gated_update=fuse_gated_update,
             gwnet_kwargs=gwnet_kwargs,
         ).to(device)
 
