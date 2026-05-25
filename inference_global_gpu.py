@@ -33,7 +33,7 @@ import torch
 #
 # Dzięki temu architektura modelu i split są spójne z inference.py.
 
-from utils.inference import (
+from inference import (
     split_file_names,
     load_flow_TN,
     load_assign_TN,
@@ -1655,8 +1655,8 @@ def build_parser():
     p.add_argument(
         "--fuse_method",
         type=str,
-        default="Attention",
-        choices=["concatenate", "Attention", "wavenet_only", "assignment_only"],
+        default="attention",
+        choices=["concatenate", "attention", "wavenet_only", "assignment_only"],
     )
 
     p.add_argument("--a_embedding_size", type=int, default=32)
@@ -1666,6 +1666,9 @@ def build_parser():
     p.add_argument("--mlp_hidden_dim", type=int, default=128)
     p.add_argument("--attention_num_heads", type=int, default=4)
     p.add_argument("--attention_ff_dim", type=int, default=128)
+    p.add_argument("--fuse_attention_num_heads", type=int, default=4)
+    p.add_argument("--fuse_attention_ff_dim", type=int, default=None)
+    p.add_argument("--fuse_gated_update", action="store_true")
 
     # Batch GPU
     p.add_argument(

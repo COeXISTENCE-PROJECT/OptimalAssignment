@@ -141,6 +141,9 @@ def build_trainer(args, device):
         mlp_hidden_dim=args.mlp_hidden_dim,
         attention_num_heads=args.attention_num_heads,
         attention_ff_dim=args.attention_ff_dim,
+        fuse_attention_num_heads=args.fuse_attention_num_heads,
+        fuse_attention_ff_dim=args.fuse_attention_ff_dim,
+        fuse_gated_update=args.fuse_gated_update,
     )
 
     state = torch.load(args.checkpoint, map_location=device)
@@ -230,8 +233,8 @@ def main():
 
     parser.add_argument("--sequence_model", type=str, default="lstm_concat",
                         choices=["lstm_concat", "gru", "attention"])
-    parser.add_argument("--fuse_method", type=str, default="Attention",
-                        choices=["concatenate", "Attention", "wavenet_only", "assignment_only"])
+    parser.add_argument("--fuse_method", type=str, default="attention",
+                        choices=["concatenate", "attention", "wavenet_only", "assignment_only"])
     parser.add_argument("--a_embedding_size", type=int, default=32)
     parser.add_argument("--a_hidden_size", type=int, default=64)
     parser.add_argument("--q_rep_dim", type=int, default=32)
@@ -239,6 +242,9 @@ def main():
     parser.add_argument("--mlp_hidden_dim", type=int, default=128)
     parser.add_argument("--attention_num_heads", type=int, default=4)
     parser.add_argument("--attention_ff_dim", type=int, default=128)
+    parser.add_argument("--fuse_attention_num_heads", type=int, default=4)
+    parser.add_argument("--fuse_attention_ff_dim", type=int, default=None)
+    parser.add_argument("--fuse_gated_update", action="store_true")
 
     args = parser.parse_args()
     out_dir = Path(args.output_dir)
