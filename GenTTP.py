@@ -53,6 +53,9 @@ class GenTTP(nn.Module):
         target_dim: int = 1,
         sequence_model: str = "lstm",      # "lstm_concat" / "gru" / "attention"
         fuse_method: str = "concatenate",    # "concatenate" / "Hadamard" / "Attention"
+        fuse_attention_num_heads: int = 4,
+        fuse_attention_ff_dim: int | None = None,
+        fuse_gated_update: bool = True,
         dropout: float = 0.1,
         device: str = "cpu",
         attention_num_heads: int = 4,
@@ -66,6 +69,7 @@ class GenTTP(nn.Module):
         default_use_gate=True,
         default_hard_gate=False,
         default_gate_threshold=0.5,
+
     ):
         super().__init__()
 
@@ -191,6 +195,10 @@ class GenTTP(nn.Module):
             dim_A=a_rep_dim,
             output_dim=fused_dim,
             method=canonical_fuse_method,
+            dropout=dropout,
+            attention_num_heads=fuse_attention_num_heads,
+            attention_ff_dim=fuse_attention_ff_dim,
+            gated_update=fuse_gated_update,
         )
 
         self.reg_head = nn.Sequential(

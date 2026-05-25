@@ -86,8 +86,39 @@ class linear(nn.Module):
         return self.mlp(x)
 
 
+class ResidualFFN(nn.Module):
+    def __init__(self, dim, hidden_dim=None, dropout=0.1):
+        super().__init__()
+
+        if hidden_dim is None:
+            hidden_dim = 2 * dim
+
+        self.norm = nn.LayerNorm(dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, dim),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x):
+        return x + self.ffn(self.norm(x))
+
+
+
 class fuse(nn.Module):
-    def __init__(self, dim_Q, dim_A, output_dim, method='concatenate'):
+    def __init__(
+        self,
+        dim_Q,
+        dim_A,
+        output_dim,
+        method='concatenate',
+        dropout=0.1,
+        attention_num_heads=4,
+        attention_ff_dim=None,
+        gated_update=True,
+    ):
         super().__init__()
 
         canonical_method = {
@@ -100,39 +131,90 @@ class fuse(nn.Module):
 
         self.method = canonical_method
         self.output_dim = output_dim
+        self.gated_update = gated_update
+
+        if attention_ff_dim is None:
+            attention_ff_dim = 2 * output_dim
 
         if self.method == 'concatenate':
             self.mlp = nn.Sequential(
                 nn.Linear(dim_Q + dim_A, output_dim),
-                nn.ReLU(),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                ResidualFFN(
+                    dim=output_dim,
+                    hidden_dim=attention_ff_dim,
+                    dropout=dropout,
+                ),
             )
 
         elif self.method == 'Hadamard':
             self.proj_Q = nn.Linear(dim_Q, output_dim)
             self.proj_A = nn.Linear(dim_A, output_dim)
 
+            self.post_fuse = ResidualFFN(
+                dim=output_dim,
+                hidden_dim=attention_ff_dim,
+                dropout=dropout,
+            )
+
         elif self.method == 'Attention':
+            if output_dim % attention_num_heads != 0:
+                raise ValueError(
+                    f"output_dim={output_dim} must be divisible by "
+                    f"attention_num_heads={attention_num_heads}"
+                )
+
             self.q_proj = nn.Linear(dim_Q, output_dim)
             self.a_proj = nn.Linear(dim_A, output_dim)
 
             self.attention = nn.MultiheadAttention(
                 embed_dim=output_dim,
-                num_heads=2,
+                num_heads=attention_num_heads,
+                dropout=dropout,
                 batch_first=True,
             )
 
-            self.out_proj = nn.Linear(output_dim, output_dim)
+            self.delta_proj = nn.Sequential(
+                nn.Linear(output_dim, output_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(output_dim, output_dim),
+            )
+
+            self.gate = nn.Sequential(
+                nn.Linear(4 * output_dim, 2 * output_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(2 * output_dim, output_dim),
+                nn.Sigmoid(),
+            )
+
+            self.norm1 = nn.LayerNorm(output_dim)
+            self.norm2 = nn.LayerNorm(output_dim)
+
+            self.ffn = nn.Sequential(
+                nn.Linear(output_dim, attention_ff_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(attention_ff_dim, output_dim),
+                nn.Dropout(dropout),
+            )
 
         elif self.method == 'wavenet_only':
             self.q_only_proj = nn.Sequential(
                 nn.Linear(dim_Q, output_dim),
-                nn.ReLU(),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                ResidualFFN(output_dim, attention_ff_dim, dropout),
             )
 
         elif self.method == 'assignment_only':
             self.a_only_proj = nn.Sequential(
                 nn.Linear(dim_A, output_dim),
-                nn.ReLU(),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                ResidualFFN(output_dim, attention_ff_dim, dropout),
             )
 
         else:
@@ -145,30 +227,43 @@ class fuse(nn.Module):
             )
 
         if self.method == 'concatenate':
-            fused = torch.cat([Q, A], dim=-1)
-            output = self.mlp(fused)
+            output = torch.cat([Q, A], dim=-1)
+            output = self.mlp(output)
 
         elif self.method == 'Hadamard':
             q = self.proj_Q(Q)
             a = self.proj_A(A)
             output = q * a
+            output = self.post_fuse(output)
 
         elif self.method == 'Attention':
-            q = self.q_proj(Q)                      # (B, D)
-            a = self.a_proj(A)                      # (B, D)
+            q = self.q_proj(Q)  # (B, D)
+            a = self.a_proj(A)  # (B, D)
 
-            query = q.unsqueeze(1)                  # (B, 1, D)
+            query = q.unsqueeze(1)  # (B, 1, D)
             key_value = torch.stack([q, a], dim=1)  # (B, 2, D)
 
-            output, _ = self.attention(
+            context, _ = self.attention(
                 query=query,
                 key=key_value,
                 value=key_value,
+                need_weights=False,
             )
 
-            output = output.squeeze(1)              # (B, D)
-            output = output + q                     # residual
-            output = self.out_proj(output)
+            context = context.squeeze(1)  # (B, D)
+
+            #gated attention update
+            #model decides how much information from token a give to token q
+            delta = self.delta_proj(context - q)
+
+            if self.gated_update:
+                gate_input = torch.cat([q, a, q * a, a - q,], dim=-1,)
+                gate = self.gate(gate_input)
+                output = self.norm1(q + gate * delta)
+            else:
+                output = self.norm1(q + delta)
+
+            output = self.norm2(output + self.ffn(output))
 
         elif self.method == 'wavenet_only':
             output = self.q_only_proj(Q)
