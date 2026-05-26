@@ -35,6 +35,7 @@ def build_arg_parser():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save_dir", type=str, default="./outputs")
     parser.add_argument("--exp_name", type=str, default="GenTTP")
+    parser.add_argument("--val_every", type=int, default=10)
 
     # Data split
     parser.add_argument("--train_ratio", type=float, default=0.7)
@@ -250,15 +251,29 @@ def main():
         train_time = time.time() - train_start
         train_metrics = finalize_metric_acc(train_acc)
 
-        val_start = time.time()
-        valid_metrics = evaluate_loader(engine, val_loader)
-        val_time = time.time() - val_start
+        should_validate = (
+                epoch % args.val_every == 0
+                or epoch == 1
+                or epoch == args.epochs
+        )
 
-        # Select best checkpoint using validation MAE
-        if valid_metrics["mae"] < best_val_mae:
-            best_val_mae = valid_metrics["mae"]
-            best_epoch = epoch
-            torch.save(engine.model.state_dict(), best_model_path)
+        if should_validate:
+            val_start = time.time()
+            valid_metrics = evaluate_loader(engine, val_loader)
+            val_time = time.time() - val_start
+
+            if valid_metrics["mae"] < best_val_mae:
+                best_val_mae = valid_metrics["mae"]
+                best_epoch = epoch
+                torch.save(engine.model.state_dict(), best_model_path)
+        else:
+            val_time = 0.0
+            valid_metrics = {
+                "loss": float("nan"),
+                "mae": best_val_mae,
+                "rmse": float("nan"),
+            }
+
 
         history["epoch"].append(epoch)
 
