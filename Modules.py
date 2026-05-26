@@ -189,6 +189,7 @@ class fuse(nn.Module):
             )
 
             self.delta_proj = nn.Sequential(
+<<<<<<< HEAD
                 nn.Linear(4 * output_dim, attention_ff_dim),
                 nn.GELU(),
                 nn.Dropout(dropout),
@@ -203,6 +204,25 @@ class fuse(nn.Module):
                 nn.Sigmoid(),
             )
 
+=======
+                nn.Linear(output_dim, output_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(output_dim, output_dim),
+            )
+
+            self.gate = nn.Sequential(
+                nn.Linear(4 * output_dim, 2 * output_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(2 * output_dim, output_dim),
+                nn.Sigmoid(),
+            )
+
+            self.norm1 = nn.LayerNorm(output_dim)
+            self.norm2 = nn.LayerNorm(output_dim)
+
+>>>>>>> 60e4303 (optimization)
             self.ffn = nn.Sequential(
                 nn.Linear(output_dim, attention_ff_dim),
                 nn.GELU(),
@@ -286,6 +306,7 @@ class fuse(nn.Module):
             output = self.post_fuse(output)
 
         elif self.method == 'Attention':
+<<<<<<< HEAD
             if Q.ndim != 2:
                 raise ValueError(f"Q must have shape (B, D), got {tuple(Q.shape)}")
 
@@ -384,6 +405,35 @@ class fuse(nn.Module):
             # pre-norm FFN branch, but no final LayerNorm
             output = output + self.ffn(self.ffn_norm(output))
 
+=======
+            q = self.q_proj(Q)  # (B, D)
+            a = self.a_proj(A)  # (B, D)
+
+            query = q.unsqueeze(1)  # (B, 1, D)
+            key_value = torch.stack([q, a], dim=1)  # (B, 2, D)
+
+            context, _ = self.attention(
+                query=query,
+                key=key_value,
+                value=key_value,
+                need_weights=False,
+            )
+
+            context = context.squeeze(1)  # (B, D)
+
+            #gated attention update
+            #model decides how much information from token a give to token q
+            delta = self.delta_proj(context - q)
+
+            if self.gated_update:
+                gate_input = torch.cat([q, a, q * a, a - q,], dim=-1,)
+                gate = self.gate(gate_input)
+                output = self.norm1(q + gate * delta)
+            else:
+                output = self.norm1(q + delta)
+
+            output = self.norm2(output + self.ffn(output))
+>>>>>>> 60e4303 (optimization)
 
         elif self.method == 'wavenet_only':
             output = self.q_only_proj(Q)
