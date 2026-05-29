@@ -1,21 +1,22 @@
 from __future__ import annotations
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from Modules import (
     GraphWaveNetBackbone,
     LSTM_Representation,
     GRU_Representation,
     AttentionRepresentation,
     fuse,
+    STAEformerBackbone,
+    AGCRNBackbone,
 )
+
 from utilities import (
     _ensure_batch_sequence,
     _normalize_lengths
 )
-
-from Modules import STAEformerBackbone, AGCRNBackbone
 
 
 class GenTTP(nn.Module):
