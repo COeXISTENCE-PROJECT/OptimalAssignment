@@ -89,7 +89,6 @@ This dataset contains paired assignment and flow files from 10 SUMO simulations 
 ```bash
 --q_dir datasets/10_grid/new_flows_10s \
 --a_dir datasets/10_grid/new_assignments_10s \
---adjdata datasets/adjacency_matrix.csv
 ```
 
 ### `datasets/1k_grid_neurips`
