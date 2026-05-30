@@ -20,9 +20,10 @@ The code provides a minimal training pipeline for GenTTP, together with baseline
 │   ├── 10_grid/
 │   │   ├── new_assignments_10s/
 │   │   ├── new_flows_10s/
-│   └── 1k_grid/
-│       ├── new_assignments_10s/
-│       └── new_flows_10s/
+│   ├── 1k_grid/
+│   |   ├── new_assignments_10s/
+│   |   └── new_flows_10s/
+|   └── adjacency_matrix.csv
 ├── images/
 │   └── GenTTP_Model.png
 ├── DataLoader.py
@@ -88,7 +89,7 @@ This dataset contains paired assignment and flow files from 10 SUMO simulations 
 ```bash
 --q_dir datasets/10_grid/new_flows_10s \
 --a_dir datasets/10_grid/new_assignments_10s \
---adjdata datasets/10_grid/merge_mapping.csv
+--adjdata datasets/adjacency_matrix.csv
 ```
 
 ### `datasets/1k_grid_neurips`
@@ -116,7 +117,7 @@ python train.py \
   --device cpu \
   --q_dir datasets/10_grid/new_flows_10s \
   --a_dir datasets/10_grid/new_assignments_10s \
-  --adjdata datasets/10_grid/merge_mapping.csv \
+  --adjdata datasets/adjacency_matrix.csv \
   --save_dir ./outputs \
   --exp_name genttp_10_grid \
   --seed 42 \
