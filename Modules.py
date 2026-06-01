@@ -168,6 +168,19 @@ class fuse(nn.Module):
             self.q_proj = nn.Linear(dim_Q, output_dim)
             self.a_proj = nn.Linear(dim_A, output_dim)
 
+            # token type embeddings: token 0 = Q, tokens >= 1 = assignment tokens
+            self.q_type_emb = nn.Parameter(torch.zeros(output_dim))
+            self.a_type_emb = nn.Parameter(torch.zeros(output_dim))
+            nn.init.normal_(self.q_type_emb, std=0.02)
+            nn.init.normal_(self.a_type_emb, std=0.02)
+
+            # medium weakening of Q attending to itself
+            self.q_self_bias = -1.5
+
+            # pre-norm before attention; no final post-residual LayerNorm
+            self.attn_norm = nn.LayerNorm(output_dim)
+            self.ffn_norm = nn.LayerNorm(output_dim)
+
             self.attention = nn.MultiheadAttention(
                 embed_dim=output_dim,
                 num_heads=attention_num_heads,
@@ -176,22 +189,19 @@ class fuse(nn.Module):
             )
 
             self.delta_proj = nn.Sequential(
-                nn.Linear(output_dim, output_dim),
+                nn.Linear(4 * output_dim, attention_ff_dim),
                 nn.GELU(),
                 nn.Dropout(dropout),
-                nn.Linear(output_dim, output_dim),
+                nn.Linear(attention_ff_dim, output_dim),
             )
 
             self.gate = nn.Sequential(
-                nn.Linear(4 * output_dim, 2 * output_dim),
+                nn.Linear(4 * output_dim, attention_ff_dim),
                 nn.GELU(),
                 nn.Dropout(dropout),
-                nn.Linear(2 * output_dim, output_dim),
+                nn.Linear(attention_ff_dim, output_dim),
                 nn.Sigmoid(),
             )
-
-            self.norm1 = nn.LayerNorm(output_dim)
-            self.norm2 = nn.LayerNorm(output_dim)
 
             self.ffn = nn.Sequential(
                 nn.Linear(output_dim, attention_ff_dim),
@@ -220,11 +230,50 @@ class fuse(nn.Module):
         else:
             raise ValueError(f"Unknown fuse method: {method}")
 
-    def forward(self, Q, A):
-        if Q.ndim != 2 or A.ndim != 2:
-            raise ValueError(
-                f"fuse expects Q and A with shape (B, D), got {Q.shape} and {A.shape}"
-            )
+    def _attention_mask(self, seq_len: int, device, dtype) -> torch.Tensor:
+        mask = torch.zeros(seq_len, seq_len, device=device, dtype=dtype)
+        mask[0, 0] = self.q_self_bias  # weaken Q -> Q
+        return mask
+
+    @staticmethod
+    def _assignment_key_padding_mask(
+            lengths: torch.Tensor | None,
+            batch_size: int,
+            a_len: int,
+            device,
+    ) -> torch.Tensor | None:
+        if lengths is None:
+            return None
+
+        lengths = lengths.to(device=device)
+        positions = torch.arange(a_len, device=device).unsqueeze(0)
+        a_mask = positions >= lengths.unsqueeze(1)
+
+        q_mask = torch.zeros(batch_size, 1, device=device, dtype=torch.bool)
+        return torch.cat([q_mask, a_mask], dim=1)
+
+    @staticmethod
+    def _masked_mean_a_tokens(
+            a_tokens: torch.Tensor,
+            lengths: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if a_tokens.ndim == 2:
+            return a_tokens
+
+        if lengths is None:
+            return a_tokens.mean(dim=1)
+
+        B, T, D = a_tokens.shape
+        device = a_tokens.device
+
+        lengths = lengths.to(device=device)
+        positions = torch.arange(T, device=device).unsqueeze(0)
+        valid = positions < lengths.unsqueeze(1)
+
+        denom = valid.sum(dim=1).clamp_min(1).unsqueeze(-1)
+        return (a_tokens * valid.unsqueeze(-1)).sum(dim=1) / denom
+
+    def forward(self, Q, A, lengths: torch.Tensor | None = None):
 
         if self.method == 'concatenate':
             output = torch.cat([Q, A], dim=-1)
@@ -237,33 +286,104 @@ class fuse(nn.Module):
             output = self.post_fuse(output)
 
         elif self.method == 'Attention':
+            if Q.ndim != 2:
+                raise ValueError(f"Q must have shape (B, D), got {tuple(Q.shape)}")
+
             q = self.q_proj(Q)  # (B, D)
-            a = self.a_proj(A)  # (B, D)
 
-            query = q.unsqueeze(1)  # (B, 1, D)
-            key_value = torch.stack([q, a], dim=1)  # (B, 2, D)
+            if A.ndim == 2:
+                # Two-token variant: [Q, A]
+                if A.size(0) != Q.size(0):
+                    raise ValueError(
+                        f"Batch mismatch: Q has batch={Q.size(0)}, A has batch={A.size(0)}"
+                    )
 
-            context, _ = self.attention(
-                query=query,
-                key=key_value,
-                value=key_value,
+                a = self.a_proj(A)  # (B, D)
+
+                q_token = q + self.q_type_emb.view(1, -1)
+                a_token = a + self.a_type_emb.view(1, -1)
+
+                tokens = torch.stack([q_token, a_token], dim=1)  # (B, 2, D)
+
+                key_padding_mask = None
+                a_context = a
+
+            elif A.ndim == 3:
+                # Sequence variant: [Q, A_1, ..., A_T]
+                if A.size(0) != Q.size(0):
+                    raise ValueError(
+                        f"Batch mismatch: Q has batch={Q.size(0)}, A has batch={A.size(0)}"
+                    )
+
+                a = self.a_proj(A)  # (B, T, D)
+                B, T, D = a.shape
+
+                q_token = q + self.q_type_emb.view(1, -1)
+                q_token = q_token.unsqueeze(1)  # (B, 1, D)
+
+                a_tokens = a + self.a_type_emb.view(1, 1, -1)  # (B, T, D)
+
+                tokens = torch.cat([q_token, a_tokens], dim=1)  # (B, 1 + T, D)
+
+                key_padding_mask = self._assignment_key_padding_mask(
+                    lengths=lengths,
+                    batch_size=B,
+                    a_len=T,
+                    device=tokens.device,
+                )
+
+                a_context = self._masked_mean_a_tokens(a, lengths=lengths)  # (B, D)
+
+            else:
+                raise ValueError(
+                    f"Attention fuse expects A with shape (B, D) or (B, T, D), "
+                    f"got {tuple(A.shape)}"
+                )
+
+            tokens_n = self.attn_norm(tokens)
+
+            attn_mask = self._attention_mask(
+                seq_len=tokens.size(1),
+                device=tokens.device,
+                dtype=tokens_n.dtype,
+            )
+
+            attn_out, _ = self.attention(
+                tokens_n,
+                tokens_n,
+                tokens_n,
+                attn_mask=attn_mask,
+                key_padding_mask=key_padding_mask,
                 need_weights=False,
             )
 
-            context = context.squeeze(1)  # (B, D)
+            # residual attention block
+            tokens_after = tokens + attn_out
 
-            #gated attention update
-            #model decides how much information from token a give to token q
-            delta = self.delta_proj(context - q)
+            # Q token after seeing A or A_1,...,A_T
+            context_q = tokens_after[:, 0, :] - self.q_type_emb.view(1, -1)
+
+            update_input = torch.cat(
+                [
+                    q,
+                    a_context,
+                    context_q,
+                    context_q - q,
+                ],
+                dim=-1,
+            )
+
+            delta = self.delta_proj(update_input)
 
             if self.gated_update:
-                gate_input = torch.cat([q, a, q * a, a - q,], dim=-1,)
-                gate = self.gate(gate_input)
-                output = self.norm1(q + gate * delta)
+                gate = self.gate(update_input)
+                output = q + gate * delta
             else:
-                output = self.norm1(q + delta)
+                output = q + delta
 
-            output = self.norm2(output + self.ffn(output))
+            # pre-norm FFN branch, but no final LayerNorm
+            output = output + self.ffn(self.ffn_norm(output))
+
 
         elif self.method == 'wavenet_only':
             output = self.q_only_proj(Q)
