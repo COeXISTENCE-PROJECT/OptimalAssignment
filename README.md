@@ -1,6 +1,6 @@
 # GenTTP: Generalised Travel Time Predictor
 
-This repository contains the original implementation of **GenTTP**, a model for approximating SUMO-based traffic assignment outputs with machine learning methods.
+This repository contains the original implementation of **GenTTP**, a model for approximating SUMO-based traffic assignment outputs with machine learning methods. The model is described in details in https://arxiv.org/abs/2605.06918.
 
 <p align="center">
   <img width="1000" src="./images/GenTTP_Model.png">
