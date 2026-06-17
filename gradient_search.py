@@ -45,6 +45,8 @@ def f_2_to_5(a2: np.ndarray) -> np.ndarray:
 
 def f_5_to_6(a5: np.ndarray) -> np.ndarray:
     """Count how many agents use each node at each timestep."""
+    if a5.ndim == 1:
+        a5 = a5[:, np.newaxis]
     return np.sum(a5, axis=1).astype(np.int16)
 
 
@@ -103,37 +105,74 @@ def od_from_a6(a6: np.ndarray, origins: Iterable[int] | None, destinations: Iter
     return np.array([origin_mass, destination_mass], dtype=np.float32)
 
 
-def g1_od_penalty(a6: np.ndarray, target_od: np.ndarray | None, origins=None, destinations=None) -> float:
+# def g1_od_penalty(a6: np.ndarray, target_od: np.ndarray | None, origins=None, destinations=None) -> float:
+#     """g1: OD consistency penalty."""
+#     if target_od is None:
+#         return 0.0
+#     od = od_from_a6(a6, origins, destinations)
+#     if od is None:
+#         return 0.0
+#     return float(np.linalg.norm(od - target_od, ord=1))
+
+
+# def g2_admissibility_penalty(a6: np.ndarray, total_agents_by_t: np.ndarray | None = None, m: int | None = None) -> float:
+#     """g2: penalize non-admissible count assignments.
+#     In A6 each entry should be an integer in [0, m]. Optionally, the total
+#     number of agents at every timestep should match total_agents_by_t.
+#     """
+#    penalty = 0.0
+#    rounded = np.rint(a6)
+#    penalty += float(np.sum(np.abs(a6 - rounded)))
+#    if m is not None:
+#        penalty += float(np.sum(np.maximum(0.0, -a6)))
+#        penalty += float(np.sum(np.maximum(0.0, a6 - m)))
+#    if total_agents_by_t is not None:
+#        penalty += float(np.sum(np.abs(np.sum(a6, axis=0) - total_agents_by_t)))
+#    return penalty
+
+def g1_od_penalty(a6: np.ndarray, target_od: np.ndarray | None = None, origins: Iterable[int] | None = None, destinations: Iterable[int] | None = None) -> float:
     """g1: OD consistency penalty."""
     if target_od is None:
         return 0.0
-    od = od_from_a6(a6, origins, destinations)
+    # Use explicit keyword mapping to avoid signature mismatches
+    od = od_from_a6(a6, origins=origins, destinations=destinations)
     if od is None:
         return 0.0
     return float(np.linalg.norm(od - target_od, ord=1))
 
-
-def g2_admissibility_penalty(a6: np.ndarray, total_agents_by_t: np.ndarray | None = None, m: int | None = None) -> float:
+def g2_admissibility_penalty(
+    a6: np.ndarray, 
+    total_agents_by_t: np.ndarray | None = None, 
+    m: int | None = None
+) -> float:
     """g2: penalize non-admissible count assignments.
-
     In A6 each entry should be an integer in [0, m]. Optionally, the total
     number of agents at every timestep should match total_agents_by_t.
     """
     penalty = 0.0
     rounded = np.rint(a6)
+    # Penalty for non-integer assignments
     penalty += float(np.sum(np.abs(a6 - rounded)))
+    
+    # Penalty for exceeding capacity [0, m]
     if m is not None:
         penalty += float(np.sum(np.maximum(0.0, -a6)))
         penalty += float(np.sum(np.maximum(0.0, a6 - m)))
+        
+    # Penalty for total agent count mismatch
     if total_agents_by_t is not None:
+        # Summing over nodes (axis 0) to compare with total_agents_by_t
         penalty += float(np.sum(np.abs(np.sum(a6, axis=0) - total_agents_by_t)))
+        
     return penalty
-
-
 def adttp_from_a6(a6: np.ndarray, delta_t: float = 1.0) -> float:
     """Default ADTTP on Representation 6: sum_t t * sum_i A6[i,t]."""
-    _, t_count = a6.shape
+    if a6.ndim == 1:
+        a6 = a6[:, np.newaxis]
+    n_nodes, t_count = a6.shape
+    
     weights = np.arange(t_count, dtype=np.float32) * float(delta_t)
+    
     return float(np.sum(a6 * weights[None, :]))
 
 
@@ -152,25 +191,108 @@ class Score:
 
 
 def score_a6(
-    a6: np.ndarray,
+    a1: np.ndarray,
+    target_od: np.ndarray,
+    constraint_matrix: np.ndarray,
+    weights: Objectiveweights,
+    model: torch.nn.Module | None = None,
+    delta_t: float = 1.0,
+    # target_od: np.ndarray | None = None,
+    # origins: Iterable[int] | None = None,
+    # destinations: Iterable[int] | None = None,
+    # total_agents_by_t: np.ndarray | None = None,
+    # m: int | None = None,
+) -> Score:
+    b = f_1_to_2(a1)
+    d = f_2_to_6(b)
+    if model is not None:
+        adttp = rollout_tt_with_genttp(model)
+    else:
+        adttp = adttp_from_a6(d, delta_t=delta_t)
+    # g1 = g1_od_penalty(d, target_od=target_od, origins=origins, destinations=destinations)
+    # g2 = g2_admissibility_penalty(b, total_agents_by_t=total_agents_by_t, m=m)
+    g1 = g1_od_penalty(a1_original, target_od)
+    g2 = g2_admissibility_penalty(b, constraint_matrix)
+    objective = adttp + weights.od * g1 + weights.admissibility * g2
+    return Score(objective=objective, adttp=adttp, g1=g1, g2=g2)
+
+def objective_a1(
+    a1_relaxed: np.ndarray,
     weights: ObjectiveWeights,
     delta_t: float = 1.0,
     target_od: np.ndarray | None = None,
     origins: Iterable[int] | None = None,
     destinations: Iterable[int] | None = None,
     total_agents_by_t: np.ndarray | None = None,
-    m: int | None = None,
-) -> Score:
+    m: int | None = None
+) -> float:
+    """
+    Computes objective function for a relaxed A1 representation.
+    f(A) = ADTTP(f_2->6(f_1->2(A))) + g1(A) + g2(f_1->2(A))
+    """
+    # 1. Project to discrete A1: map R to {-1, 0, 1}
+    # Using np.sign ensures we maintain the signed representation A1
+    a1_discrete = np.sign(a1_relaxed).astype(np.int8) 
+    
+    # 2. Map to A2 and A6 space
+    # f_1_to_2 transforms A1 -> A2
+    a2 = f_1_to_2(a1_discrete)
+    # f_2_to_6 transforms A2 -> A6
+    a6 = f_2_to_6(a2)
+    
+    # 3. Calculate components
+    # ADTTP is calculated based on A6
     adttp = adttp_from_a6(a6, delta_t=delta_t)
+    
+    # g1: OD consistency penalty on A1
+    # Note: Using a1_discrete as it represents the assignment
     g1 = g1_od_penalty(a6, target_od=target_od, origins=origins, destinations=destinations)
+    
+    # g2: Admissibility penalty on A2 (B = f_1_to_2(A1))
     g2 = g2_admissibility_penalty(a6, total_agents_by_t=total_agents_by_t, m=m)
-    objective = adttp + weights.od * g1 + weights.admissibility * g2
-    return Score(objective=objective, adttp=adttp, g1=g1, g2=g2)
+    
+    # Total objective
+    return float(adttp + weights.od * g1 + weights.admissibility * g2)
 
+
+def initialize_search_a1(shape):
+    """
+    Initialize search in the latent space of A1.
+    Shape: (N, N, m, T)
+    """
+    # Initialize with small random values to allow gradient flow
+    return np.random.normal(0, 0.1, shape)
 
 # ============================================================
 # Grid candidate generation in Representation 6
 # ============================================================
+
+def perform_gradient_search_a1(
+    initial_a1: np.ndarray,
+    weights: ObjectiveWeights,
+    learning_rate: float = 0.01,
+    iterations: int = 100,
+    **kwargs
+) -> np.ndarray:
+    """
+    Performs iterative gradient descent on the latent A1 representation.
+    """
+    p = initial_a1.copy().astype(np.float32)
+    
+    for i in range(iterations):
+        # In a real implementation, you would compute the gradient via 
+        # autograd (if using PyTorch) or numerical approximation.
+        # This acts as the placeholder for the update step.
+        
+        # Current score
+        current_score = objective_a1(p, weights, **kwargs)
+        
+        # Here you would typically apply: p = p - learning_rate * gradient(objective_a1)
+        # For a simple grid/random search, you might instead perturb P:
+        perturbation = np.random.normal(0, 0.01, p.shape)
+        p += perturbation
+        
+    return np.sign(p).astype(np.int8)
 
 
 def parse_int_list(text: str | None) -> list[int]:
@@ -349,124 +471,112 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_arg_parser().parse_args()
+    target_od = None
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    base = load_assignment_as_a6(args.base_assignment, num_nodes=args.num_nodes)
+    # 1. Setup base configurations
+    base_a6 = load_assignment_as_a6(args.base_assignment, num_nodes=args.num_nodes)
     if args.num_nodes is None:
-        args.num_nodes = int(base.shape[0])
-
-    nodes = parse_int_list(args.nodes)
-    timesteps = parse_int_list(args.timesteps)
-    values = parse_int_list(args.values)
-    if not values:
-        raise ValueError("--values cannot be empty")
-
-    origins = parse_int_list(args.origins)
-    destinations = parse_int_list(args.destinations)
-    target_od = None
+        args.num_nodes = int(base_a6.shape[0])
+    
+    # Weights and constraints
+    weights = ObjectiveWeights(od=args.od_weight, admissibility=args.admissibility_weight)
+    total_by_t = np.sum(base_a6, axis=0) if args.preserve_total_by_t else None
     if args.target_od is not None:
         target_od = np.array([float(x) for x in args.target_od.split(",")], dtype=np.float32)
-        if target_od.shape != (2,):
-            raise ValueError("--target_od must contain exactly two comma-separated values")
-
-    total_by_t = np.sum(base, axis=0) if args.preserve_total_by_t else None
-    weights = ObjectiveWeights(od=args.od_weight, admissibility=args.admissibility_weight)
-
+    # 2. Build model if provided
     model, device = maybe_build_genttp(args)
     q_seed_tn = None
     if model is not None:
-        if args.q_seed is None or args.adjdata is None:
-            raise ValueError("--checkpoint mode requires --q_seed and --adjdata")
         q_seed = load_assignment_as_a6(args.q_seed, num_nodes=args.num_nodes)
         q_seed_tn = q_seed.T.astype(np.float32)
 
-    if args.candidate_dir is not None:
-        candidates = load_candidates_from_dir(args.candidate_dir, num_nodes=args.num_nodes)
-    else:
-        candidates = (
-            (f"grid_{idx:06d}.npy", cand)
-            for idx, cand in enumerate(
-                generate_local_grid_a6(
-                    base=base,
-                    nodes=nodes,
-                    timesteps=timesteps,
-                    values=values,
-                    m=args.m,
-                    max_candidates=args.max_candidates,
-                )
+    # 3. Initialize Gradient Search in A1 Space
+    # Latent space P dimension: (N, N, m, T)
+    m_val = args.m if args.m is not None else 1
+    latent_shape = (args.num_nodes, args.num_nodes, m_val, base_a6.shape[1])
+    
+    # Initialize P randomly or from existing assignment (if possible)
+    p = initialize_search_a1(latent_shape)
+    history = []
+    origins = parse_int_list(args.origins)
+    destinations = parse_int_list(args.destinations)
+    # 4. Run Optimization Loop
+    # We iteratively update P to minimize objective_a1
+    for i in range(args.max_candidates // 100): # Using max_candidates as iteration budget
+        if i % 5 == 0:
+            current_objective = objective_a1(
+                a1_relaxed=p,
+                weights=weights,
+                delta_t=args.delta_t,
+                target_od=target_od,          # Defined in main()
+                origins=origins,              # Parsed from args.origins
+                destinations=destinations,    # Parsed from args.destinations
+                total_agents_by_t=total_by_t, # Optional: defined if preserve_total_by_t is set
+                m=args.m                      # Defined from args
             )
-        )
-
-    rows = []
-    best_name = None
-    best_score = math.inf
-    best_a6 = None
-
-    for idx, (name, cand) in enumerate(candidates):
-        cand = np.asarray(cand, dtype=np.float32)
-        score = score_a6(
-            cand,
+            print(f"Iteration {i}: loss = {current_objective:.2f}")
+        # In a real gradient implementation, perform P = P - lr * grad(objective_a1)
+        # Here we perform the update via the gradient search logic
+        p = perform_gradient_search_a1(
+            initial_a1=p,
             weights=weights,
             delta_t=args.delta_t,
-            target_od=target_od,
-            origins=origins,
-            destinations=destinations,
+            target_od=None, # Define your target_od here
             total_agents_by_t=total_by_t,
             m=args.m,
+            learning_rate=args.learning_rate
         )
-        adttp_model = np.nan
-        objective = score.objective
+        
+        # 5. Map best P to A6 for evaluation with Model (if exists)
+        a1_discrete = np.sign(p).astype(np.int8)
+        best_a6_cand = f_2_to_6(f_1_to_2(a1_discrete))
+        
+        # 6. Evaluation
+        # If model exists, use it to calculate refined objective
         if model is not None:
+            # Calculate the model-based ADTTP
             adttp_model = rollout_tt_with_genttp(
                 model=model,
                 device=device,
                 seed_q_tn=q_seed_tn,
-                candidate_a6=cand,
+                candidate_a6=best_a6_cand,
                 seq_length_q=args.seq_length_q,
                 seq_length_a=args.seq_length_a,
                 delta_t=args.delta_t,
             )
-            objective = float(adttp_model + weights.od * score.g1 + weights.admissibility * score.g2)
-
-        rows.append(
-            {
-                "rank_input": idx,
-                "candidate": name,
+            
+            # Calculate penalties using the updated candidate
+            # Note: We re-calculate scores on the projected A6 candidate
+            score = score_a6(
+                best_a6_cand,
+                weights=weights,
+                delta_t=args.delta_t,
+                target_od=target_od,
+                origins=origins,
+                destinations=destinations,
+                total_agents_by_t=total_by_t,
+                m=args.m,
+            )
+            history.append({
+                "iteration": i,
                 "objective": objective,
-                "adttp_a6": score.adttp,
-                "adttp_model": adttp_model,
+                "adttp": score.adttp,
                 "g1_od": score.g1,
-                "g2_admissibility": score.g2,
-            }
-        )
-        if objective < best_score:
-            best_score = objective
-            best_name = name
-            best_a6 = cand.copy()
-
-    df = pd.DataFrame(rows).sort_values("objective", ascending=True).reset_index(drop=True)
-    df.insert(0, "rank", np.arange(1, len(df) + 1))
-    df.to_csv(out_dir / "grid_search_results.csv", index=False)
-    if best_a6 is not None:
-        save_a6(out_dir / "best_assignment_a6.npy", best_a6)
-
-    manifest = {
-        "base_assignment": str(args.base_assignment),
-        "candidate_dir": args.candidate_dir,
-        "best_candidate": best_name,
-        "best_objective": best_score,
-        "shape_a6": list(base.shape),
-        "args": vars(args),
-    }
-    with open(out_dir / "grid_search_manifest.json", "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2, ensure_ascii=False, default=str)
-
-    print(f"Evaluated {len(df)} candidates")
-    print(f"Best candidate: {best_name}")
-    print(f"Best objective: {best_score:.6f}")
-    print(f"Saved results to: {out_dir}")
-
+                "g2_admissibility": score.g2
+            })
+            # Combine the model-predicted ADTTP with the structural penalties
+            objective = float(adttp_model + weights.od * score.g1 + weights.admissibility * score.g2)
+            
+            # Update best_score if this candidate is superior
+            if objective < best_score:
+                best_score = objective
+                best_name = f"gradient_step_{i:04d}.npy"
+                best_a6 = best_a6_cand.copy()    
+    # 7. Final output saving logic...
+    pd.DataFrame(history).to_csv(out_dir / "optimization_history.csv")
+    print("Gradient search complete.")
 
 if __name__ == "__main__":
     main()
