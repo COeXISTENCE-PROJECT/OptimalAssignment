@@ -1563,7 +1563,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max_candidates",
         type=int,
-        default=10_000,
+        default=100,
         help="Backward-compatible iteration budget when --iterations is omitted.",
     )
     parser.add_argument("--iterations", type=int, default=None)
@@ -1749,7 +1749,7 @@ def main() -> None:
 
     # 2. Optional GenTTP model.
     model, device = maybe_build_genttp(args)
-
+    print("[status] GenTTP checkpoint loaded; starting candidate search", flush=True)
     if device is None:
         device = torch.device(args.device if torch is not None and torch.cuda.is_available() else "cpu")
 
