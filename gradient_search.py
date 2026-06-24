@@ -223,6 +223,430 @@ def g2_admissibility_penalty(
 
     return penalty
 
+def init_a6_logits_from_base(
+    base_a6: np.ndarray,
+    m: int | None = None,
+    total_agents_by_t: np.ndarray | None = None,
+    eps: float = 1e-4,
+) -> np.ndarray:
+    """
+    Initialize unconstrained logits so that the first relaxed A6 is close to base_a6.
+    If total_agents_by_t is used, logits are interpreted column-wise through softmax.
+    Otherwise, logits are interpreted through sigmoid/softplus.
+    """
+    base = np.asarray(base_a6, dtype=np.float32)
+
+    if total_agents_by_t is not None:
+        # Softmax over nodes per timestep. log(base + eps) reconstructs the distribution.
+        return np.log(base + eps).astype(np.float32)
+
+    if m is not None:
+        # A6 = m * sigmoid(logits)
+        p = np.clip(base / float(m), eps, 1.0 - eps)
+        return np.log(p / (1.0 - p)).astype(np.float32)
+
+    # A6 = softplus(logits), inverse softplus approximately.
+    return np.log(np.exp(base) - 1.0 + eps).astype(np.float32)
+
+
+def logits_to_relaxed_a6(
+    logits: torch.Tensor,
+    m: int | None = None,
+    total_agents_by_t: np.ndarray | None = None,
+) -> torch.Tensor:
+    """
+    Convert unconstrained logits to continuous relaxed A6.
+
+    If preserve_total_by_t is active, each timestep column sums exactly to
+    the original total number of agents.
+    """
+    if total_agents_by_t is not None:
+        totals = torch.as_tensor(
+            total_agents_by_t,
+            dtype=logits.dtype,
+            device=logits.device,
+        )
+        probs = torch.softmax(logits, dim=0)
+        return probs * totals[None, :]
+
+    if m is not None:
+        return float(m) * torch.sigmoid(logits)
+
+    return torch.nn.functional.softplus(logits)
+
+
+def differentiable_genttp_total_time(
+    model,
+    seed_q_tn: np.ndarray,
+    candidate_a6: torch.Tensor,
+    seq_length_q: int,
+    seq_length_a: int,
+    delta_t: float,
+) -> torch.Tensor:
+    """
+    Differentiable GenTTP rollout wrt candidate_a6.
+
+    candidate_a6: torch tensor with shape (N,T)
+    seed_q_tn: numpy array with shape (T,N)
+    """
+    assign_tn = candidate_a6.T
+    real_q_tn = torch.as_tensor(
+        seed_q_tn,
+        dtype=assign_tn.dtype,
+        device=assign_tn.device,
+    )
+
+    if tuple(assign_tn.shape) != tuple(real_q_tn.shape):
+        raise ValueError(
+            f"q and assignment shapes must match as (T,N): "
+            f"{tuple(real_q_tn.shape)} vs {tuple(assign_tn.shape)}"
+        )
+
+    seed_steps = max(seq_length_q, seq_length_a)
+    t_count, n_nodes = real_q_tn.shape
+
+    if t_count <= seed_steps:
+        raise ValueError(f"Too few timesteps: T={t_count}, seed_steps={seed_steps}")
+
+    generated = [real_q_tn[t] for t in range(seed_steps)]
+
+    for t in range(seed_steps, t_count):
+        q_window = torch.stack(generated[t - seq_length_q:t], dim=0).unsqueeze(0)
+        a_window = assign_tn[t - seq_length_a:t].unsqueeze(0)
+
+        pred = model(q_window, a_window)
+
+        if pred.dim() == 2:
+            pred_step = pred[0]
+        elif pred.dim() == 3 and pred.shape[1] == 1:
+            pred_step = pred[0, 0]
+        else:
+            raise ValueError(f"Unexpected prediction shape: {tuple(pred.shape)}")
+
+        generated.append(pred_step)
+
+    generated_tn = torch.stack(generated, dim=0)
+    return float(delta_t) * torch.sum(generated_tn[seed_steps:, :n_nodes])
+
+
+def relaxed_objective_a6_torch(
+    relaxed_a6: torch.Tensor,
+    weights: ObjectiveWeights,
+    delta_t: float = 1.0,
+    target_od: np.ndarray | None = None,
+    origins: Iterable[int] | None = None,
+    destinations: Iterable[int] | None = None,
+    total_agents_by_t: np.ndarray | None = None,
+    m: int | None = None,
+    model: torch.nn.Module | None = None,
+    seed_q_tn: np.ndarray | None = None,
+    seq_length_q: int = 15,
+    seq_length_a: int = 30,
+    use_genttp_gradient: bool = False,
+) -> torch.Tensor:
+    """
+    Differentiable objective on relaxed A6.
+    This is the actual loss used for gradient descent.
+    """
+    dtype = relaxed_a6.dtype
+    device = relaxed_a6.device
+
+    if use_genttp_gradient and model is not None:
+        if seed_q_tn is None:
+            raise ValueError("seed_q_tn is required for differentiable GenTTP gradient.")
+        adttp = differentiable_genttp_total_time(
+            model=model,
+            seed_q_tn=seed_q_tn,
+            candidate_a6=relaxed_a6,
+            seq_length_q=seq_length_q,
+            seq_length_a=seq_length_a,
+            delta_t=delta_t,
+        )
+    else:
+        t_count = relaxed_a6.shape[1]
+        time_weights = torch.arange(t_count, dtype=dtype, device=device) * float(delta_t)
+        adttp = torch.sum(relaxed_a6 * time_weights[None, :])
+
+    origins = list(origins or [])
+    destinations = list(destinations or [])
+
+    g1 = torch.zeros((), dtype=dtype, device=device)
+    if target_od is not None and len(origins) > 0 and len(destinations) > 0:
+        target = torch.as_tensor(target_od, dtype=dtype, device=device)
+        od = torch.stack(
+            [
+                torch.sum(relaxed_a6[origins, 0]),
+                torch.sum(relaxed_a6[destinations, -1]),
+            ]
+        )
+        g1 = torch.sum(torch.abs(od - target))
+
+    g2 = torch.zeros((), dtype=dtype, device=device)
+
+    # Encourage integer-like counts while keeping gradient.
+    g2 = g2 + torch.sum(torch.abs(relaxed_a6 - torch.round(relaxed_a6.detach())))
+
+    if total_agents_by_t is not None:
+        total = torch.as_tensor(total_agents_by_t, dtype=dtype, device=device)
+        g2 = g2 + torch.sum(torch.abs(torch.sum(relaxed_a6, dim=0) - total))
+
+    if m is not None:
+        g2 = g2 + torch.relu(-relaxed_a6).sum()
+        g2 = g2 + torch.relu(relaxed_a6 - float(m)).sum()
+
+    return adttp + weights.od * g1 + weights.admissibility * g2
+
+
+def project_a6_counts(
+    relaxed_a6: np.ndarray,
+    m: int | None = None,
+    total_agents_by_t: np.ndarray | None = None,
+) -> np.ndarray:
+    """
+    Project continuous A6 to integer count A6.
+
+    If total_agents_by_t is given, each timestep column is repaired so that
+    sum_i A6[i,t] equals the requested total.
+    """
+    raw = np.asarray(relaxed_a6, dtype=np.float32)
+    projected = np.rint(raw).astype(np.float32)
+    projected = np.maximum(projected, 0.0)
+
+    if m is not None:
+        projected = np.minimum(projected, float(m))
+
+    if total_agents_by_t is None:
+        return projected.astype(np.float32)
+
+    target = np.rint(total_agents_by_t).astype(int)
+    n_nodes, t_count = projected.shape
+
+    for t in range(t_count):
+        target_t = int(max(0, target[t]))
+        if m is not None:
+            target_t = min(target_t, n_nodes * int(m))
+
+        current_t = int(np.sum(projected[:, t]))
+
+        while current_t < target_t:
+            capacity = np.inf if m is None else float(m) - projected[:, t]
+            eligible = np.where(capacity > 0)[0]
+            if len(eligible) == 0:
+                break
+
+            # Add to nodes whose relaxed value most wants to be higher.
+            residual = raw[eligible, t] - projected[eligible, t]
+            i = eligible[int(np.argmax(residual))]
+            projected[i, t] += 1.0
+            current_t += 1
+
+        while current_t > target_t:
+            eligible = np.where(projected[:, t] > 0)[0]
+            if len(eligible) == 0:
+                break
+
+            # Remove from nodes whose relaxed value least supports current count.
+            residual = projected[eligible, t] - raw[eligible, t]
+            i = eligible[int(np.argmax(residual))]
+            projected[i, t] -= 1.0
+            current_t -= 1
+
+    return projected.astype(np.float32)
+
+
+def perform_gradient_search_a6(
+    base_a6: np.ndarray,
+    weights: ObjectiveWeights,
+    learning_rate: float = 0.01,
+    iterations: int = 100,
+    delta_t: float = 1.0,
+    target_od: np.ndarray | None = None,
+    origins: Iterable[int] | None = None,
+    destinations: Iterable[int] | None = None,
+    total_agents_by_t: np.ndarray | None = None,
+    m: int | None = None,
+    model: torch.nn.Module | None = None,
+    device=None,
+    seed_q_tn: np.ndarray | None = None,
+    seq_length_q: int = 15,
+    seq_length_a: int = 30,
+    use_genttp_gradient: bool = False,
+    log_every: int = 1,
+) -> tuple[np.ndarray, Score, list[dict], str]:
+    """
+    Proper gradient search directly in relaxed A6 space.
+    """
+    if torch is None:
+        raise RuntimeError("PyTorch is required for gradient search.")
+
+    if iterations <= 0:
+        raise ValueError("iterations must be positive")
+
+    log_every = max(1, int(log_every))
+
+    if device is None:
+        optim_device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    elif isinstance(device, torch.device):
+        optim_device = device
+    else:
+        optim_device = torch.device(device)
+
+    if model is not None:
+        model = model.to(optim_device)
+        model.eval()
+        for param in model.parameters():
+            param.requires_grad_(False)
+
+    initial_logits = init_a6_logits_from_base(
+        base_a6,
+        m=m,
+        total_agents_by_t=total_agents_by_t,
+    )
+
+    logits = torch.as_tensor(
+        initial_logits,
+        dtype=torch.float32,
+        device=optim_device,
+    ).clone().detach().requires_grad_(True)
+
+    optimizer = torch.optim.Adam([logits], lr=learning_rate)
+
+    best_score = Score(
+        objective=math.inf,
+        adttp=math.inf,
+        g1=math.inf,
+        g2=math.inf,
+    )
+    best_a6: np.ndarray | None = None
+    best_name = "gradient_step_0000.npy"
+    history: list[dict] = []
+
+    origins = list(origins or [])
+    destinations = list(destinations or [])
+
+    for iteration in range(iterations):
+        optimizer.zero_grad()
+
+        relaxed_a6 = logits_to_relaxed_a6(
+            logits,
+            m=m,
+            total_agents_by_t=total_agents_by_t,
+        )
+
+        surrogate_loss = relaxed_objective_a6_torch(
+            relaxed_a6,
+            weights=weights,
+            delta_t=delta_t,
+            target_od=target_od,
+            origins=origins,
+            destinations=destinations,
+            total_agents_by_t=total_agents_by_t,
+            m=m,
+            model=model,
+            seed_q_tn=seed_q_tn,
+            seq_length_q=seq_length_q,
+            seq_length_a=seq_length_a,
+            use_genttp_gradient=use_genttp_gradient,
+        )
+
+        surrogate_loss.backward()
+        optimizer.step()
+
+        should_log = iteration % log_every == 0 or iteration == iterations - 1
+        if not should_log:
+            continue
+
+        with torch.no_grad():
+            relaxed_eval = logits_to_relaxed_a6(
+                logits,
+                m=m,
+                total_agents_by_t=total_agents_by_t,
+            )
+            relaxed_np = relaxed_eval.detach().cpu().numpy()
+
+        candidate_a6 = project_a6_counts(
+            relaxed_np,
+            m=m,
+            total_agents_by_t=total_agents_by_t,
+        )
+
+        score = score_a6(
+            candidate_a6,
+            weights=weights,
+            delta_t=delta_t,
+            target_od=target_od,
+            origins=origins,
+            destinations=destinations,
+            total_agents_by_t=total_agents_by_t,
+            m=m,
+            model=model,
+            device=optim_device,
+            seed_q_tn=seed_q_tn,
+            seq_length_q=seq_length_q,
+            seq_length_a=seq_length_a,
+        )
+
+        improved = score.objective < best_score.objective
+        if improved:
+            best_score = score
+            best_a6 = candidate_a6.copy()
+            best_name = f"gradient_step_{iteration:04d}.npy"
+
+        history.append(
+            {
+                "iteration": iteration,
+                "surrogate_loss": float(surrogate_loss.detach().cpu().item()),
+                "objective": score.objective,
+                "adttp": score.adttp,
+                "g1_od": score.g1,
+                "g2_admissibility": score.g2,
+                "best_objective": best_score.objective,
+                "improved": bool(improved),
+            }
+        )
+
+        print(
+            f"Iteration {iteration:04d}: "
+            f"surrogate={float(surrogate_loss.detach().cpu().item()):.4f}, "
+            f"objective={score.objective:.4f}, "
+            f"adttp={score.adttp:.4f}, "
+            f"g1={score.g1:.4f}, "
+            f"g2={score.g2:.4f}, "
+            f"best={best_score.objective:.4f}",
+            flush=True,
+        )
+
+    if best_a6 is None:
+        with torch.no_grad():
+            relaxed_eval = logits_to_relaxed_a6(
+                logits,
+                m=m,
+                total_agents_by_t=total_agents_by_t,
+            )
+        best_a6 = project_a6_counts(
+            relaxed_eval.detach().cpu().numpy(),
+            m=m,
+            total_agents_by_t=total_agents_by_t,
+        )
+        best_score = score_a6(
+            best_a6,
+            weights=weights,
+            delta_t=delta_t,
+            target_od=target_od,
+            origins=origins,
+            destinations=destinations,
+            total_agents_by_t=total_agents_by_t,
+            m=m,
+            model=model,
+            device=optim_device,
+            seed_q_tn=seed_q_tn,
+            seq_length_q=seq_length_q,
+            seq_length_a=seq_length_a,
+        )
+
+    return best_a6, best_score, history, best_name
+
+
 
 def adttp_from_a6(a6: np.ndarray, delta_t: float = 1.0) -> float:
     """Default ADTTP on Representation 6: sum_t t * sum_i A6[i,t]."""
@@ -772,6 +1196,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fuse_attention_num_heads", type=int, default=4)
     parser.add_argument("--fuse_attention_ff_dim", type=int, default=None)
     parser.add_argument("--fuse_gated_update", action="store_true")
+    parser.add_argument(
+        "--use_genttp_gradient",
+        action="store_true",
+        help=(
+            "Backpropagate through GenTTP rollout when --checkpoint is used. "
+            "Without this, GenTTP is used only to score projected candidates."
+        ),
+    )
 
     return parser
 
@@ -830,68 +1262,57 @@ def main() -> None:
 
     autoencoder = None
     autoencoder_path = None
-    ae_history: list[dict] | None = None
 
-    if q_seed_a6 is not None and int(q_seed_a6.shape[1]) != int(base_a6.shape[1]):
-        print(f"Padding q_seed from T={q_seed_a6.shape[1]} to T={base_a6.shape[1]}.")
-        q_seed_a6 = pad_or_crop_a6_time(
-            q_seed_a6,
-            target_timesteps=int(base_a6.shape[1]),
-            pad_value=args.ae_pad_value,
-            name="q_seed",
-            allow_crop=args.ae_allow_crop,
+    if q_seed_a6 is not None and tuple(q_seed_a6.shape) != tuple(base_a6.shape):
+        raise ValueError(
+            f"q_seed and base_assignment must have the same A6 shape. "
+            f"Got q_seed={tuple(q_seed_a6.shape)}, base={tuple(base_a6.shape)}"
         )
-        q_seed_tn = q_seed_a6.T.astype(np.float32)
-
     total_by_t = np.sum(base_a6, axis=0) if args.preserve_total_by_t else None
 
-    # 4. Optimise either repaired relaxed A1 or autoencoder latent z.
-    best_z = None
-    best_soft_a6 = None
-
-    if 1==1:
-        initial_p = initialize_search_a1_from_a6(
-            base_a6,
-            m=m_latent,
-            threshold=args.projection_threshold,
-            rng=rng,
+    if args.checkpoint is not None and not args.use_genttp_gradient:
+        print(
+            "WARNING: --checkpoint is used only for scoring projected candidates. "
+            "The gradient direction uses the simple differentiable A6 surrogate. "
+            "Pass --use_genttp_gradient to backpropagate through GenTTP.",
+            flush=True,
         )
 
-        best_a6, best_score, history, best_name = perform_gradient_search_a1(
-            initial_a1=initial_p,
-            weights=weights,
-            learning_rate=args.learning_rate,
-            iterations=iterations,
-            delta_t=args.delta_t,
-            target_od=target_od,
-            origins=origins,
-            destinations=destinations,
-            total_agents_by_t=total_by_t,
-            m=args.m,
-            model=model,
-            device=device,
-            seed_q_tn=q_seed_tn,
-            seq_length_q=args.seq_length_q,
-            seq_length_a=args.seq_length_a,
-            projection_threshold=args.projection_threshold,
-            temperature=args.temperature,
-            log_every=args.log_every,
+    if args.preserve_total_by_t and args.checkpoint is None and target_od is None:
+        print(
+            "WARNING: --preserve_total_by_t makes simple ADTTP constant with respect "
+            "to spatial redistribution. Without GenTTP gradient or OD/end-point target, "
+            "the gradient signal may be weak.",
+            flush=True,
         )
 
+    best_a6, best_score, history, best_name = perform_gradient_search_a6(
+        base_a6=base_a6,
+        weights=weights,
+        learning_rate=args.learning_rate,
+        iterations=iterations,
+        delta_t=args.delta_t,
+        target_od=target_od,
+        origins=origins,
+        destinations=destinations,
+        total_agents_by_t=total_by_t,
+        m=args.m,
+        model=model,
+        device=device,
+        seed_q_tn=q_seed_tn,
+        seq_length_q=args.seq_length_q,
+        seq_length_a=args.seq_length_a,
+        use_genttp_gradient=args.use_genttp_gradient,
+        log_every=args.log_every,
+    )
     # 5. Save outputs.
     best_path = out_dir / "best_assignment_a6.npy"
     save_a6(best_path, best_a6)
-
-    if best_z is not None:
-        np.save(out_dir / "best_latent_z.npy", np.asarray(best_z, dtype=np.float32))
-    if best_soft_a6 is not None:
-        np.save(out_dir / "best_decoded_soft_a6.npy", np.asarray(best_soft_a6, dtype=np.float32))
 
     history_path = out_dir / "optimization_history.csv"
     pd.DataFrame(history).to_csv(history_path, index=False)
 
     summary = {
-        "search_space": args.search_space,
         "best_name": best_name,
         "best_assignment": str(best_path),
         "best_objective": best_score.objective,
@@ -907,12 +1328,7 @@ def main() -> None:
         "original_base_timesteps": original_base_timesteps,
         "effective_timesteps": int(base_a6.shape[1]),
         "ae_target_timesteps": int(autoencoder.input_shape[1]) if autoencoder is not None else None,
-        "ae_pad_value": float(args.ae_pad_value),
-        "ae_allow_crop": bool(args.ae_allow_crop),
         "ae_checkpoint": str(autoencoder_path) if autoencoder_path is not None else None,
-        "latent_restarts": args.latent_restarts if args.search_space == "latent" else None,
-        "latent_init": args.latent_init if args.search_space == "latent" else None,
-        "latent_use_genttp_gradient": bool(args.latent_use_genttp_gradient),
     }
 
     summary_path = out_dir / "optimization_summary.json"
@@ -920,14 +1336,6 @@ def main() -> None:
         json.dump(summary, f, indent=2)
 
     print("Gradient search complete.")
-    print(f"Search space: {args.search_space}")
-    print(f"Best objective: {best_score.objective:.4f}")
-    print(f"Best assignment saved to: {best_path}")
-    if int(base_a6.shape[1]) != original_base_timesteps:
-        print(f"Effective AE/optimization horizon: T={base_a6.shape[1]} (base was T={original_base_timesteps})")
-    if best_z is not None:
-        print(f"Best latent vector saved to: {out_dir / 'best_latent_z.npy'}")
-        print(f"Best soft decoded A6 saved to: {out_dir / 'best_decoded_soft_a6.npy'}")
     print(f"History saved to: {history_path}")
     print(f"Summary saved to: {summary_path}")
 
