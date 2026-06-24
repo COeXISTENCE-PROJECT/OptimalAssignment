@@ -537,9 +537,16 @@ def perform_gradient_search_a6(
 
     if model is not None:
         model = model.to(optim_device)
-        model.eval()
-        for param in model.parameters():
-            param.requires_grad_(False)
+
+        # We do not train GenTTP weights, but if we backpropagate through
+        # an LSTM/cuDNN RNN wrt the assignment input, the RNN must be in train mode.
+        if use_genttp_gradient:
+            model.train()
+        else:
+            model.eval()
+
+    for param in model.parameters():
+        param.requires_grad_(False)
 
     initial_logits = init_a6_logits_from_base(
         base_a6,
@@ -573,8 +580,10 @@ def perform_gradient_search_a6(
 
     origins = list(origins or [])
     destinations = list(destinations or [])
-
+    print("[status] entering optimization loop", flush=True)
     for iteration in range(iterations):
+        print(f"[status] iteration {iteration:04d}: starting", flush=True)
+
         optimizer.zero_grad()
 
         relaxed_a6 = logits_to_relaxed_a6(
@@ -598,7 +607,7 @@ def perform_gradient_search_a6(
             seq_length_a=seq_length_a,
             use_genttp_gradient=use_genttp_gradient,
         )
-
+        print(f"[status] iteration {iteration:04d}: projection done", flush=True)
         surrogate_loss.backward()
         optimizer.step()
 
@@ -1233,7 +1242,7 @@ def initialize_search_a1_from_a6(
     if rng is None:
         rng = np.random.default_rng()
 
-    base_a6 = np.rint(np.asarray(base_a6)).astype(int)
+    base_a6 = np.rint(np.asarray(base_a6)).astype(np.float32)
     n_nodes, t_count = base_a6.shape
 
     p = rng.normal(
@@ -1770,7 +1779,9 @@ def main() -> None:
             f"q_seed and base_assignment must have the same A6 shape. "
             f"Got q_seed={tuple(q_seed_a6.shape)}, base={tuple(base_a6.shape)}"
         )
-    total_by_t = np.sum(base_a6, axis=0) if args.preserve_total_by_t else None
+    total_by_t = None
+    if args.preserve_total_by_t:
+        total_by_t = np.rint(np.sum(base_a6, axis=0)).astype(np.float32)
 
     if args.checkpoint is not None and not args.use_genttp_gradient:
         print(
@@ -1809,6 +1820,7 @@ def main() -> None:
         projection_samples=args.projection_samples,
         projection_noise=args.projection_noise,
     )
+    
     # 5. Save outputs.
     best_path = out_dir / "best_assignment_a6.npy"
     save_a6(best_path, best_a6)
