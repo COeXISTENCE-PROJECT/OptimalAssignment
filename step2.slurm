@@ -5,7 +5,13 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --output=slurm-%j.out
-#SBATCH --gres=gpu:1
+
+
+
+
+
+
+# --gres=gpu:1
 
 set -euo pipefail
 
@@ -42,10 +48,10 @@ max_candidates=20
 od_weight=0.0
 origin_weight=100.0
 destination_weight=100.0
-admissibility_weight=10.0
-connectivity_weight=100.0
-projection_samples=8
-projection_noise=0.9
+admissibility_weight=1000.0
+connectivity_weight=1000.0
+projection_samples=16
+projection_noise=0.7
 preserve_total_by_t=true
 
 # REQUIRED if origin/destination losses are active.
@@ -62,7 +68,7 @@ seq_length_a=30
 sequence_model=lstm
 fuse_method=attention
 nhid=128
-dropout=0.15
+dropout=0
 learning_rate=0.001
 weight_decay=0.01
 kernel_size=2
@@ -111,7 +117,6 @@ cmd=(
   --fuse_attention_ff_dim "$fuse_attention_ff_dim"
   --fuse_attention_num_heads "$fuse_attention_num_heads"
   --gcn_bool
-  --od_weight "$od_weight"
   --origin_weight "$origin_weight"
   --destination_weight "$destination_weight"
   --admissibility_weight "$admissibility_weight"
@@ -138,10 +143,6 @@ fi
 
 if [[ -n "$destinations" ]]; then
   cmd+=(--destinations "$destinations")
-fi
-
-if [[ -n "$target_od" ]]; then
-  cmd+=(--target_od "$target_od")
 fi
 
 "${cmd[@]}"

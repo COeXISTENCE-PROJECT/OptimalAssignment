@@ -1,21 +1,40 @@
 #!/usr/bin/env python3
-"""Gradient search over Step 2 assignment Representation 6.
-
-This version repairs the gradient-search path and logging in the original
-`gradient_search.py` from the `step_2_branch` branch.
-
-Key fixes:
-- `score_a6` now scores A6 candidates consistently.
-- Broken names such as `Objectiveweights`, `a1_original`, `constraint_matrix`,
-  `objective`, and `best_score` are removed or initialized correctly.
-- The optimization loop uses PyTorch autograd on a differentiable relaxed A1
-  surrogate, then evaluates the hard projected A6 candidate.
-- `target_od` is preserved instead of being overwritten with None.
-- `optimization_history.csv` is written for all runs, not only checkpoint runs.
 """
+Gradient-based search for AV fleet assignment in Representation A6.
 
+Problem
+-------
+We optimize an assignment of agents/vehicles to graph nodes over time.
+The assignment is represented as:
+
+    A6[i, t] = number of agents using node i at timestep t
+
+The goal is to minimize predicted total travel time while respecting
+structural constraints:
+    - vehicles start at allowed origin nodes,
+    - vehicles end at allowed destination nodes,
+    - node-time counts are admissible,
+    - mass can only move between adjacent graph nodes.
+
+Optimization strategy
+---------------------
+The true assignment is discrete, so we optimize a continuous relaxed A6
+with PyTorch autograd. At logging/evaluation time, the relaxed assignment
+is projected back to an integer A6 candidate and scored with the real
+objective.
+
+Main quantities
+---------------
+surrogate_loss:
+    Differentiable objective used by Adam.
+
+adttp:
+    Predicted total travel time of a projected candidate.
+
+objective:
+    adttp plus weighted penalties. This is used to select the best candidate.
+"""
 from __future__ import annotations
-
 import argparse
 import itertools
 import json
@@ -23,83 +42,23 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
-
 import numpy as np
 import pandas as pd
+import torch
+from representations import *
+from objectives import *
 
-try:
-    import torch
-except Exception:  # pragma: no cover
-    torch = None
-
-
-# ============================================================
-# Assignment representations
-# ============================================================
-# A1: {-1, 0, 1}^{N x N x m x T}
-# A2: {0, 1}^{N x N x m x T}
-# A3: {-1, 0, 1}^{N x m x T}
-# A5: {0, 1}^{N x m x T}
-# A6: [m]_0^{N x T}
-
-
-def f_1_to_2(a1: np.ndarray) -> np.ndarray:
-    """Remove signs element-wise: B_ijht = A_ijht^2."""
-    return np.square(a1).astype(np.int8)
-
-
-def f_1_to_3(a1: np.ndarray) -> np.ndarray:
-    """Aggregate signed representation over the second node index j."""
-    return np.sum(a1, axis=1).astype(np.int16)
-
-
-def f_2_to_5(a2: np.ndarray) -> np.ndarray:
-    """Reduce binary edge-agent-time tensor to binary node-agent-time tensor."""
-    return np.max(a2, axis=1).astype(np.int8)
-
-
-def f_5_to_6(a5: np.ndarray) -> np.ndarray:
-    """Count how many agents use each node at each timestep."""
-    if a5.ndim == 1:
-        a5 = a5[:, np.newaxis]
-    return np.sum(a5, axis=1).astype(np.int16)
-
-
-def f_2_to_6(a2: np.ndarray) -> np.ndarray:
-    """A2 -> A5 -> A6."""
-    return f_5_to_6(f_2_to_5(a2))
-
-
-def load_assignment_as_a6(path: str | Path, num_nodes: int | None = None) -> np.ndarray:
-    """Load assignment counts as A6 with shape (N, T).
-
-    Repository data commonly stores assignments as (N, T), (T, N),
-    (N, T, 1), or (T, N, 1). This helper normalizes them to (N, T).
-    """
-    arr = np.load(path)
-
-    if arr.ndim == 3 and arr.shape[-1] == 1:
-        arr = arr[..., 0]
-
-    if arr.ndim != 2:
-        raise ValueError(
-            f"Assignment must be 2D or 3D with singleton channel, got {arr.shape}"
-        )
-
-    if num_nodes is not None:
-        if arr.shape[0] == num_nodes:
-            out = arr
-        elif arr.shape[1] == num_nodes:
-            out = arr.T
-        else:
-            raise ValueError(
-                f"Cannot infer node axis for shape {arr.shape} and num_nodes={num_nodes}"
-            )
-    else:
-        out = arr
-
-    return np.asarray(out, dtype=np.float32)
-
+"""
+==========================
+Assignment representations
+==========================
+A1: {-1, 0, 1}^{N x N x m x T}
+A2: {0, 1}^{N x N x m x T}
+A3: {-1, 0, 1}^{N x m x T}
+A5: {0, 1}^{N x m x T}
+A6: [m]_0^{N x T}
+==========================
+"""
 
 def pad_or_crop_a6_time(
     a6: np.ndarray,
@@ -237,15 +196,12 @@ def init_a6_logits_from_base(
     base = np.asarray(base_a6, dtype=np.float32)
 
     if total_agents_by_t is not None:
-        # Softmax over nodes per timestep. log(base + eps) reconstructs the distribution.
         return np.log(base + eps).astype(np.float32)
 
     if m is not None:
-        # A6 = m * sigmoid(logits)
         p = np.clip(base / float(m), eps, 1.0 - eps)
         return np.log(p / (1.0 - p)).astype(np.float32)
 
-    # A6 = softplus(logits), inverse softplus approximately.
     return np.log(np.exp(base) - 1.0 + eps).astype(np.float32)
 
 
@@ -328,60 +284,6 @@ def differentiable_genttp_total_time(
     generated_tn = torch.stack(generated, dim=0)
     return float(delta_t) * torch.sum(generated_tn[seed_steps:, :n_nodes])
 
-def relaxed_objective_a6_torch(
-    relaxed_a6: torch.Tensor,
-    weights: ObjectiveWeights,
-    delta_t: float = 1.0,
-    target_od: np.ndarray | None = None,   # can be kept, but no longer needed
-    origins: Iterable[int] | None = None,
-    destinations: Iterable[int] | None = None,
-    total_agents_by_t: np.ndarray | None = None,
-    m: int | None = None,
-    model: torch.nn.Module | None = None,
-    seed_q_tn: np.ndarray | None = None,
-    seq_length_q: int = 15,
-    seq_length_a: int = 30,
-    use_genttp_gradient: bool = False,
-    adjacency: np.ndarray | torch.Tensor | None = None,
-) -> torch.Tensor:
-
-    dtype = relaxed_a6.dtype
-    device = relaxed_a6.device
-
-    if use_genttp_gradient and model is not None:
-        if seed_q_tn is None:
-            raise ValueError("seed_q_tn is required for differentiable GenTTP gradient.")
-        travel_time = differentiable_genttp_total_time(
-            model=model,
-            seed_q_tn=seed_q_tn,
-            candidate_a6=relaxed_a6,
-            seq_length_q=seq_length_q,
-            seq_length_a=seq_length_a,
-            delta_t=delta_t,
-        )
-    else:
-        t_count = relaxed_a6.shape[1]
-        time_weights = torch.arange(t_count, dtype=dtype, device=device) * float(delta_t)
-        travel_time = torch.sum(relaxed_a6 * time_weights[None, :])
-
-    penalties = structured_assignment_loss_a6_torch(
-        relaxed_a6,
-        origins=origins,
-        destinations=destinations,
-        total_agents_by_t=total_agents_by_t,
-        m=m,
-        adjacency=adjacency,
-        add_self_loops=True,
-    )
-
-    return (
-        travel_time
-        + weights.origin * penalties["origin"]
-        + weights.destination * penalties["destination"]
-        + weights.admissibility * penalties["admissibility"]
-        + weights.connectivity * penalties["connectivity"]
-    )
-
 def structured_assignment_loss_a1_torch(
     p: torch.Tensor,
     *,
@@ -401,34 +303,26 @@ def structured_assignment_loss_a1_torch(
     device = p.device
     n_nodes, _, m, t_count = p.shape
 
-    # Soft active edge indicator.
     x = torch.sigmoid(temperature * (torch.abs(p) - threshold))
 
     edge_mask = edge_mask.to(dtype=dtype, device=device)
     origin_mask = _node_mask(origins, n_nodes, dtype, device)
     dest_mask = _node_mask(destinations, n_nodes, dtype, device)
 
-    # No illegal edges.
     L_edge = (x * (1.0 - edge_mask[:, :, None, None])).sum()
 
-    # Each agent should choose exactly one transition per timestep.
     per_agent_time = x.sum(dim=(0, 1))  # (m,T)
     L_one_transition = torch.abs(per_agent_time - 1.0).sum()
 
-    # Start/end node occupancy per agent.
     start_occ = x.sum(dim=1)  # (N,m,T), start node i
     end_occ = x.sum(dim=0)    # (N,m,T), end node j
 
-    # Origin at t=0.
     origin_per_agent = (origin_mask[:, None] * start_occ[:, :, 0]).sum(dim=0)
     L_origin = torch.abs(origin_per_agent - 1.0).sum()
 
-    # Destination at final represented consistently with A6 as node occupancy at T-1.
     dest_per_agent = (dest_mask[:, None] * start_occ[:, :, -1]).sum(dim=0)
     L_destination = torch.abs(dest_per_agent - 1.0).sum()
 
-    # Exact path continuity:
-    # end node at t must equal start node at t+1 for every agent.
     L_connectivity = torch.abs(end_occ[:, :, :-1] - start_occ[:, :, 1:]).sum()
 
     return {
@@ -538,8 +432,6 @@ def perform_gradient_search_a6(
     if model is not None:
         model = model.to(optim_device)
 
-        # We do not train GenTTP weights, but if we backpropagate through
-        # an LSTM/cuDNN RNN wrt the assignment input, the RNN must be in train mode.
         if use_genttp_gradient:
             model.train()
         else:
@@ -580,9 +472,7 @@ def perform_gradient_search_a6(
 
     origins = list(origins or [])
     destinations = list(destinations or [])
-    print("[status] entering optimization loop", flush=True)
     for iteration in range(iterations):
-        print(f"[status] iteration {iteration:04d}: starting", flush=True)
 
         optimizer.zero_grad()
 
@@ -608,7 +498,6 @@ def perform_gradient_search_a6(
             use_genttp_gradient=use_genttp_gradient,
             adjacency=adjacency
         )
-        print(f"[status] iteration {iteration:04d}: projection done", flush=True)
         surrogate_loss.backward()
         optimizer.step()
 
@@ -720,17 +609,6 @@ def perform_gradient_search_a6(
     return best_a6, best_score, history, best_name
 
 
-
-def adttp_from_a6(a6: np.ndarray, delta_t: float = 1.0) -> float:
-    """Default ADTTP on Representation 6: sum_t t * sum_i A6[i,t]."""
-    if a6.ndim == 1:
-        a6 = a6[:, np.newaxis]
-
-    _, t_count = a6.shape
-    weights = np.arange(t_count, dtype=np.float32) * float(delta_t)
-    return float(np.sum(a6 * weights[None, :]))
-
-
 @dataclass
 class ObjectiveWeights:
     od: float = 0.0
@@ -788,7 +666,6 @@ def sample_projected_a6_candidates(
     """
     candidates = []
 
-    # Always include the direct projection.
     candidates.append(
         project_a6_counts(
             relaxed_a6,
@@ -812,399 +689,6 @@ def sample_projected_a6_candidates(
         candidates.append(candidate)
 
     return candidates
-
-def structured_assignment_loss_a6_torch(
-    relaxed_a6: torch.Tensor,
-    *,
-    origins,
-    destinations,
-    total_agents_by_t=None,
-    m=None,
-    adjacency=None,
-    add_self_loops=True,
-    eps=1e-6,
-):
-    """
-    relaxed_a6: shape (N,T), continuous nonnegative assignment counts.
-
-    Loss factors:
-      L_origin:       all initial mass must start in origin nodes
-      L_destination:  all final mass must end in destination nodes
-      L_admissibility: integer-ish, bounded, correct total mass
-      L_connectivity: aggregate mass can only move through graph edges
-    """
-    dtype = relaxed_a6.dtype
-    device = relaxed_a6.device
-    n_nodes, t_count = relaxed_a6.shape
-
-    if total_agents_by_t is not None:
-        total = torch.as_tensor(total_agents_by_t, dtype=dtype, device=device)
-        if total.numel() != t_count:
-            raise ValueError(f"total_agents_by_t must have length {t_count}")
-    else:
-        # If no total is provided, use the current relaxed totals only for scaling.
-        total = relaxed_a6.sum(dim=0).detach()
-
-    total_mass = torch.clamp(total.sum(), min=eps)
-    target_origin_mass = torch.clamp(total[0], min=0.0)
-    target_destination_mass = torch.clamp(total[-1], min=0.0)
-
-    origin_mask = _node_mask(origins, n_nodes, dtype, device)
-    destination_mask = _node_mask(destinations, n_nodes, dtype, device)
-
-    # 1. Origin correctness:
-    # penalize mass outside origins at t=0 and missing/excess mass inside origins.
-    x0 = relaxed_a6[:, 0]
-    origin_inside = torch.sum(origin_mask * x0)
-    origin_outside = torch.sum((1.0 - origin_mask) * x0)
-    L_origin = (
-        origin_outside
-        + torch.abs(origin_inside - target_origin_mass)
-    ) / torch.clamp(target_origin_mass, min=1.0)
-
-    # 2. Destination correctness:
-    xT = relaxed_a6[:, -1]
-    dest_inside = torch.sum(destination_mask * xT)
-    dest_outside = torch.sum((1.0 - destination_mask) * xT)
-    L_destination = (
-        dest_outside
-        + torch.abs(dest_inside - target_destination_mass)
-    ) / torch.clamp(target_destination_mass, min=1.0)
-
-    # 3. Admissibility:
-    # A6 entries should be integer counts in [0,m], and timestep totals should match.
-    L_integer = torch.sin(math.pi * relaxed_a6).pow(2).sum() / torch.clamp(
-        torch.tensor(float(n_nodes * t_count), dtype=dtype, device=device),
-        min=1.0,
-    )
-
-    L_bounds = torch.relu(-relaxed_a6).sum()
-    if m is not None:
-        L_bounds = L_bounds + torch.relu(relaxed_a6 - float(m)).sum()
-    L_bounds = L_bounds / total_mass
-
-    if total_agents_by_t is not None:
-        L_total = torch.abs(relaxed_a6.sum(dim=0) - total).sum() / total_mass
-    else:
-        L_total = torch.zeros((), dtype=dtype, device=device)
-
-    L_admissibility = L_integer + L_bounds + L_total
-
-    # 4. Connectivity:
-    # Forward condition: mass at node j at t+1 must be reachable from predecessors at t.
-    # Backward condition: mass at node i at t must have at least one reachable successor at t+1.
-    A = _prepare_adjacency(
-        adjacency,
-        n_nodes,
-        dtype,
-        device,
-        add_self_loops=add_self_loops,
-    )
-
-    if A is None:
-        L_connectivity = torch.zeros((), dtype=dtype, device=device)
-    else:
-        prev_mass = relaxed_a6[:, :-1]       # (N,T-1)
-        next_mass = relaxed_a6[:, 1:]        # (N,T-1)
-
-        reachable_next_capacity = A.T @ prev_mass
-        unreachable_next = torch.relu(next_mass - reachable_next_capacity)
-
-        reachable_prev_capacity = A @ next_mass
-        stranded_prev = torch.relu(prev_mass - reachable_prev_capacity)
-
-        L_connectivity = (
-            unreachable_next.sum() + stranded_prev.sum()
-        ) / torch.clamp(total[:-1].sum(), min=1.0)
-
-    return {
-        "origin": L_origin,
-        "destination": L_destination,
-        "admissibility": L_admissibility,
-        "connectivity": L_connectivity,
-    }
-
-def score_a6(
-    candidate_a6: np.ndarray,
-    weights: ObjectiveWeights,
-    delta_t: float = 1.0,
-    target_od: np.ndarray | None = None,
-    origins: Iterable[int] | None = None,
-    destinations: Iterable[int] | None = None,
-    total_agents_by_t: np.ndarray | None = None,
-    m: int | None = None,
-    model: torch.nn.Module | None = None,
-    device=None,
-    seed_q_tn: np.ndarray | None = None,
-    seq_length_q: int = 15,
-    seq_length_a: int = 30,
-    adjacency: np.ndarray | torch.Tensor | None = None,
-) -> Score:
-    candidate_a6 = np.asarray(candidate_a6, dtype=np.float32)
-
-    if model is None:
-        adttp = adttp_from_a6(candidate_a6, delta_t=delta_t)
-    else:
-        if seed_q_tn is None or device is None:
-            raise ValueError("seed_q_tn and device are required when scoring with GenTTP.")
-        adttp = rollout_tt_with_genttp(
-            model=model,
-            device=device,
-            seed_q_tn=seed_q_tn,
-            candidate_a6=candidate_a6,
-            seq_length_q=seq_length_q,
-            seq_length_a=seq_length_a,
-            delta_t=delta_t,
-        )
-
-    if torch is None:
-        raise RuntimeError("PyTorch is required for structured scoring.")
-
-    score_device = device if device is not None else "cpu"
-
-    with torch.no_grad():
-        a6_t = torch.as_tensor(candidate_a6, dtype=torch.float32, device=score_device)
-        penalties = structured_assignment_loss_a6_torch(
-            a6_t,
-            origins=origins,
-            destinations=destinations,
-            total_agents_by_t=total_agents_by_t,
-            m=m,
-            adjacency=adjacency,
-            add_self_loops=True,
-        )
-
-        origin = float(penalties["origin"].detach().cpu())
-        destination = float(penalties["destination"].detach().cpu())
-        admissibility = float(penalties["admissibility"].detach().cpu())
-        connectivity = float(penalties["connectivity"].detach().cpu())
-
-    objective = float(
-        adttp
-        + weights.origin * origin
-        + weights.destination * destination
-        + weights.admissibility * admissibility
-        + weights.connectivity * connectivity
-    )
-
-    return Score(
-        objective=objective,
-        adttp=float(adttp),
-        g1=origin + destination + connectivity,
-        g2=admissibility,
-    )
-
-def score_a6(
-    candidate_a6: np.ndarray,
-    weights: ObjectiveWeights,
-    delta_t: float = 1.0,
-    target_od: np.ndarray | None = None,
-    origins: Iterable[int] | None = None,
-    destinations: Iterable[int] | None = None,
-    total_agents_by_t: np.ndarray | None = None,
-    m: int | None = None,
-    model: torch.nn.Module | None = None,
-    device=None,
-    seed_q_tn: np.ndarray | None = None,
-    seq_length_q: int = 15,
-    seq_length_a: int = 30,
-    adjacency: np.ndarray | torch.Tensor | None = None,
-) -> Score:
-    candidate_a6 = np.asarray(candidate_a6, dtype=np.float32)
-
-    if model is None:
-        adttp = adttp_from_a6(candidate_a6, delta_t=delta_t)
-    else:
-        if seed_q_tn is None or device is None:
-            raise ValueError("seed_q_tn and device are required when scoring with GenTTP.")
-        adttp = rollout_tt_with_genttp(
-            model=model,
-            device=device,
-            seed_q_tn=seed_q_tn,
-            candidate_a6=candidate_a6,
-            seq_length_q=seq_length_q,
-            seq_length_a=seq_length_a,
-            delta_t=delta_t,
-        )
-
-    if torch is None:
-        raise RuntimeError("PyTorch is required for structured scoring.")
-
-    score_device = device if device is not None else "cpu"
-
-    with torch.no_grad():
-        a6_t = torch.as_tensor(candidate_a6, dtype=torch.float32, device=score_device)
-        penalties = structured_assignment_loss_a6_torch(
-            a6_t,
-            origins=origins,
-            destinations=destinations,
-            total_agents_by_t=total_agents_by_t,
-            m=m,
-            adjacency=adjacency,
-            add_self_loops=True,
-        )
-
-        origin = float(penalties["origin"].detach().cpu())
-        destination = float(penalties["destination"].detach().cpu())
-        admissibility = float(penalties["admissibility"].detach().cpu())
-        connectivity = float(penalties["connectivity"].detach().cpu())
-
-    objective = float(
-        adttp
-        + weights.origin * origin
-        + weights.destination * destination
-        + weights.admissibility * admissibility
-        + weights.connectivity * connectivity
-    )
-
-    return Score(
-        objective=objective,
-        adttp=float(adttp),
-        g1=origin + destination + connectivity,
-        g2=admissibility,
-    )
-
-def score_a6(
-    candidate_a6: np.ndarray,
-    weights: ObjectiveWeights,
-    delta_t: float = 1.0,
-    target_od: np.ndarray | None = None,
-    origins: Iterable[int] | None = None,
-    destinations: Iterable[int] | None = None,
-    total_agents_by_t: np.ndarray | None = None,
-    m: int | None = None,
-    model: torch.nn.Module | None = None,
-    device=None,
-    seed_q_tn: np.ndarray | None = None,
-    seq_length_q: int = 15,
-    seq_length_a: int = 30,
-    adjacency: np.ndarray | torch.Tensor | None = None,
-) -> Score:
-    candidate_a6 = np.asarray(candidate_a6, dtype=np.float32)
-
-    if model is None:
-        adttp = adttp_from_a6(candidate_a6, delta_t=delta_t)
-    else:
-        if seed_q_tn is None or device is None:
-            raise ValueError("seed_q_tn and device are required when scoring with GenTTP.")
-        adttp = rollout_tt_with_genttp(
-            model=model,
-            device=device,
-            seed_q_tn=seed_q_tn,
-            candidate_a6=candidate_a6,
-            seq_length_q=seq_length_q,
-            seq_length_a=seq_length_a,
-            delta_t=delta_t,
-        )
-
-    if torch is None:
-        raise RuntimeError("PyTorch is required for structured scoring.")
-
-    score_device = device if device is not None else "cpu"
-
-    with torch.no_grad():
-        a6_t = torch.as_tensor(candidate_a6, dtype=torch.float32, device=score_device)
-        penalties = structured_assignment_loss_a6_torch(
-            a6_t,
-            origins=origins,
-            destinations=destinations,
-            total_agents_by_t=total_agents_by_t,
-            m=m,
-            adjacency=adjacency,
-            add_self_loops=True,
-        )
-
-        origin = float(penalties["origin"].detach().cpu())
-        destination = float(penalties["destination"].detach().cpu())
-        admissibility = float(penalties["admissibility"].detach().cpu())
-        connectivity = float(penalties["connectivity"].detach().cpu())
-
-    objective = float(
-        adttp
-        + weights.origin * origin
-        + weights.destination * destination
-        + weights.admissibility * admissibility
-        + weights.connectivity * connectivity
-    )
-
-    return Score(
-        objective=objective,
-        adttp=float(adttp),
-        g1=origin + destination + connectivity,
-        g2=admissibility,
-    )
-
-
-def score_a6(
-    candidate_a6: np.ndarray,
-    weights: ObjectiveWeights,
-    delta_t: float = 1.0,
-    target_od: np.ndarray | None = None,
-    origins: Iterable[int] | None = None,
-    destinations: Iterable[int] | None = None,
-    total_agents_by_t: np.ndarray | None = None,
-    m: int | None = None,
-    model: torch.nn.Module | None = None,
-    device=None,
-    seed_q_tn: np.ndarray | None = None,
-    seq_length_q: int = 15,
-    seq_length_a: int = 30,
-    adjacency: np.ndarray | torch.Tensor | None = None,
-) -> Score:
-    candidate_a6 = np.asarray(candidate_a6, dtype=np.float32)
-
-    if model is None:
-        adttp = adttp_from_a6(candidate_a6, delta_t=delta_t)
-    else:
-        if seed_q_tn is None or device is None:
-            raise ValueError("seed_q_tn and device are required when scoring with GenTTP.")
-        adttp = rollout_tt_with_genttp(
-            model=model,
-            device=device,
-            seed_q_tn=seed_q_tn,
-            candidate_a6=candidate_a6,
-            seq_length_q=seq_length_q,
-            seq_length_a=seq_length_a,
-            delta_t=delta_t,
-        )
-
-    if torch is None:
-        raise RuntimeError("PyTorch is required for structured scoring.")
-
-    score_device = device if device is not None else "cpu"
-
-    with torch.no_grad():
-        a6_t = torch.as_tensor(candidate_a6, dtype=torch.float32, device=score_device)
-        penalties = structured_assignment_loss_a6_torch(
-            a6_t,
-            origins=origins,
-            destinations=destinations,
-            total_agents_by_t=total_agents_by_t,
-            m=m,
-            adjacency=adjacency,
-            add_self_loops=True,
-        )
-
-        origin = float(penalties["origin"].detach().cpu())
-        destination = float(penalties["destination"].detach().cpu())
-        admissibility = float(penalties["admissibility"].detach().cpu())
-        connectivity = float(penalties["connectivity"].detach().cpu())
-
-    objective = float(
-        adttp
-        + weights.origin * origin
-        + weights.destination * destination
-        + weights.admissibility * admissibility
-        + weights.connectivity * connectivity
-    )
-
-    return Score(
-        objective=objective,
-        adttp=float(adttp),
-        g1=origin + destination + connectivity,
-        g2=admissibility,
-    )
-
 
 # ============================================================
 # Gradient search in relaxed A1 space
@@ -1643,7 +1127,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Penalize candidates whose sum_i A6[i,t] differs from base.",
     )
 
-    # Optional GenTTP args, compatible with inference.py/build_trainer.
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument(
         "--q_seed",
@@ -1704,7 +1187,6 @@ def load_adjacency_matrix(path: str | Path, num_nodes: int) -> np.ndarray:
     if path.suffix == ".npy":
         A = np.load(path).astype(np.float32)
     else:
-        # For CSV adjacency with row labels, matching utilities.load_csv_adj style.
         A = pd.read_csv(path, index_col=0).to_numpy(dtype=np.float32)
 
     if A.shape != (num_nodes, num_nodes):
@@ -1721,7 +1203,6 @@ def main() -> None:
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Setup base configuration.
     base_a6 = load_assignment_as_a6(args.base_assignment, num_nodes=args.num_nodes)
     if args.num_nodes is None:
         args.num_nodes = int(base_a6.shape[0])
@@ -1738,7 +1219,7 @@ def main() -> None:
     )
 
     original_base_timesteps = int(base_a6.shape[1])
-    total_by_t = None  # computed after any AE time-axis padding
+    total_by_t = None
 
     target_od = None
     if args.target_od is not None:
@@ -1747,7 +1228,6 @@ def main() -> None:
             raise ValueError("--target_od must contain exactly two comma-separated values")
         target_od = np.array(values, dtype=np.float32)
 
-    # 2. Optional GenTTP model.
     model, device = maybe_build_genttp(args)
     print("[status] GenTTP checkpoint loaded; starting candidate search", flush=True)
     if device is None:
@@ -1822,8 +1302,7 @@ def main() -> None:
         projection_samples=args.projection_samples,
         projection_noise=args.projection_noise,
     )
-    
-    # 5. Save outputs.
+
     best_path = out_dir / "best_assignment_a6.npy"
     save_a6(best_path, best_a6)
 
