@@ -606,6 +606,7 @@ def perform_gradient_search_a6(
             seq_length_q=seq_length_q,
             seq_length_a=seq_length_a,
             use_genttp_gradient=use_genttp_gradient,
+            adjacency=adjacency
         )
         print(f"[status] iteration {iteration:04d}: projection done", flush=True)
         surrogate_loss.backward()
@@ -625,8 +626,8 @@ def perform_gradient_search_a6(
 
         candidate_list = sample_projected_a6_candidates(
             relaxed_np,
-            n_samples=64,
-            noise_scale=0.75,
+            n_samples=projection_samples,
+            noise_scale=projection_noise,
             m=m,
             total_agents_by_t=total_agents_by_t,
             rng=rng,
@@ -713,6 +714,7 @@ def perform_gradient_search_a6(
             seed_q_tn=seed_q_tn,
             seq_length_q=seq_length_q,
             seq_length_a=seq_length_a,
+            adjacency=adjacency,
         )
 
     return best_a6, best_score, history, best_name
