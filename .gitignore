@@ -10,3 +10,6 @@ dataset_utils/__pycache__/*
 /garage/
 /tests_and_infernce/
 /utils/
+/outputs/
+/ga/test.ipynb
+*__pycache__/*
