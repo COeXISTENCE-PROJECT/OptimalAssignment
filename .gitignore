@@ -13,3 +13,5 @@ dataset_utils/__pycache__/*
 /outputs/
 /ga/test.ipynb
 *__pycache__/*
+.DS_Store
+ga/__pycache__/*
