@@ -15,7 +15,7 @@ class Scenario:
 
     od_keys: list                # "origin_edge|destination_edge" of each agent
     departure_steps: np.ndarray  # 10-second step in which each agent departs
-    allowed: list                # allowed route clusters of each agent
+    allowed_routes: list                # allowed route clusters of each agent
 
     @property
     def num_agents(self):
@@ -38,6 +38,6 @@ def load_scenario():
         f"{row['origins']}|{row['destinations']}": [k for k, col in enumerate(MASK_COLUMNS) if row[col] == 1]
         for _, row in masks.iterrows()
     }
-    allowed = [allowed_by_od[key] for key in od_keys]
+    allowed_routes = [allowed_by_od[key] for key in od_keys]
 
-    return Scenario(od_keys=od_keys, departure_steps=departure_steps, allowed=allowed)
+    return Scenario(od_keys=od_keys, departure_steps=departure_steps, allowed_routes=allowed_routes)
