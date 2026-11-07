@@ -3,18 +3,19 @@ import os
 import random
 
 from ga.decoder import Decoder
-from ga.fitness import make_fitness
+from ga.fitness import make_genttp_fitness
+from ga.model_loader import load_model
 from ga.population import Population
 from ga.scenario import load_scenario
 
 
-POPULATION_SIZE = 20
-GENERATIONS = 100
+POPULATION_SIZE = 7
+GENERATIONS = 7
 CROSSOVER_RATE = 0.9
 MUTATION_RATE = 0.1
 ELITE_PERCENT = 0.2
 SEED = 42
-OUTPUT_DIR = "outputs/ga/"
+OUTPUT_DIR = "outputs/ga"
 
 
 if __name__ == "__main__":
@@ -23,7 +24,8 @@ if __name__ == "__main__":
 
     scenario = load_scenario()
     decoder = Decoder(scenario)
-    fitness_fn = make_fitness(decoder)
+    model = load_model()
+    fitness_fn = make_genttp_fitness(decoder, model)
 
     population = Population(POPULATION_SIZE, scenario.allowed_routes)
     elite_size = int(POPULATION_SIZE * ELITE_PERCENT)
@@ -34,7 +36,7 @@ if __name__ == "__main__":
         best = population.get_best_individual()
         mean = sum(ind.fitness for ind in population.individuals) / POPULATION_SIZE
         history.append({"generation": generation, "best": best.fitness, "mean": mean})
-        print(f"gen {generation:3d}  best {best.fitness:.2f}  mean {mean:.2f}")
+        print(f"gen {generation:3d}  best {best.fitness:.2f}  mean {mean:.2f}", flush=True)
 
         population.crossover(CROSSOVER_RATE, ELITE_PERCENT)
         population.mutate(MUTATION_RATE, elite_size)

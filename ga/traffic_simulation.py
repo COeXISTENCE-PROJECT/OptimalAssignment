@@ -5,7 +5,7 @@ WINDOW_LENGTH_Q = 15
 WINDOW_LENGTH_A = 30
 
 @torch.no_grad()
-def rollout(model, A, start_q=None, device="cpu"):
+def simulate_traffic(model, A, start_q=None, device="cpu"):
     num_steps, num_cells = A.shape
     history_len = max(WINDOW_LENGTH_Q, WINDOW_LENGTH_A)
 
