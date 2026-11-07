@@ -34,6 +34,9 @@ class TrainerGenTTP:
         mlp_hidden_dim=64,
         attention_num_heads=4,
         attention_ff_dim=64,
+        fuse_attention_num_heads=4,
+        fuse_attention_ff_dim=None,
+        fuse_gated_update=True,
     ):
         self.device = device
 
@@ -66,6 +69,9 @@ class TrainerGenTTP:
             dropout=dropout,
             attention_num_heads=attention_num_heads,
             attention_ff_dim=attention_ff_dim,
+            fuse_attention_num_heads=fuse_attention_num_heads,
+            fuse_attention_ff_dim=fuse_attention_ff_dim,
+            fuse_gated_update=fuse_gated_update,
             gwnet_kwargs=gwnet_kwargs,
         ).to(device)
 
@@ -77,8 +83,11 @@ class TrainerGenTTP:
         self.scaler = scaler
         self.clip = 5
 
+        self.use_amp = device.type == "cuda"
+        self.grad_scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
+
     def _prepare_target(self, pred, real_val):
-        real = real_val.to(self.device)
+        real = real_val
 
         if real.shape != pred.shape:
             real = real.reshape_as(pred)
@@ -88,34 +97,33 @@ class TrainerGenTTP:
 
     def train(self, batch_or_q, a=None, real_val=None, lengths=None):
         self.model.train()
-        self.optimizer.zero_grad()
+        self.optimizer.zero_grad(set_to_none=True)
 
         q, a, real_val, lengths = unpack_batch(
             batch_or_q, a=a, real_val=real_val, lengths=lengths
         )
-        q = q.to(self.device)
-        a = a.to(self.device)
-        real_val = real_val.to(self.device)
+        q = q.to(self.device, non_blocking=True)
+        a = a.to(self.device, non_blocking=True)
+        real_val = real_val.to(self.device, non_blocking=True)
 
         if lengths is not None:
-            lengths = lengths.to(self.device)
+            lengths = lengths.to(self.device, non_blocking = True)
 
-        pred = self.model(q, a, lengths=lengths)
+        with torch.cuda.amp.autocast(enabled=self.use_amp):
+            pred = self.model(q, a, lengths=lengths)
 
-        if self.scaler is not None:
-            pred = self.scaler.inverse_transform(pred)
+            if self.scaler is not None:
+                pred = self.scaler.inverse_transform(pred)
 
-        real = self._prepare_target(pred, real_val)
-
-        loss = mae(pred, real)
-        loss.backward()
+            real = self._prepare_target(pred, real_val)
+            loss = mae(pred, real)
 
         if self.clip is not None:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip)
 
         self.optimizer.step()
 
-        return compute_metrics(pred, real, loss)
+        return compute_metrics(pred.detach(), real.detach(), loss.detach())
 
     @torch.no_grad()
     def eval(self, batch_or_q, a=None, real_val=None, lengths=None):
@@ -125,20 +133,20 @@ class TrainerGenTTP:
             batch_or_q, a=a, real_val=real_val, lengths=lengths
         )
 
-        q = q.to(self.device)
-        a = a.to(self.device)
-        real_val = real_val.to(self.device)
+        q = q.to(self.device, non_blocking=True)
+        a = a.to(self.device, non_blocking=True)
+        real_val = real_val.to(self.device, non_blocking=True)
 
         if lengths is not None:
-            lengths = lengths.to(self.device)
+            lengths = lengths.to(self.device, non_blocking=True)
 
-        pred = self.model(q, a, lengths=lengths)
+        with torch.cuda.amp.autocast(enabled=self.use_amp):
+            pred = self.model(q, a, lengths=lengths)
 
-        if self.scaler is not None:
-            pred = self.scaler.inverse_transform(pred)
+            if self.scaler is not None:
+                pred = self.scaler.inverse_transform(pred)
 
-        real = self._prepare_target(pred, real_val)
-
-        loss = mae(pred, real)
+            real = self._prepare_target(pred, real_val)
+            loss = mae(pred, real)
 
         return compute_metrics(pred, real, loss)

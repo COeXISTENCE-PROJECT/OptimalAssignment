@@ -1,22 +1,21 @@
 from __future__ import annotations
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from Modules import (
     GraphWaveNetBackbone,
     LSTM_Representation,
     GRU_Representation,
     AttentionRepresentation,
     fuse,
-    STAEformerBackbone,
-    AGCRNBackbone,
 )
-
 from utilities import (
     _ensure_batch_sequence,
     _normalize_lengths
 )
+
+from Modules import STAEformerBackbone, AGCRNBackbone
 
 
 class GenTTP(nn.Module):
@@ -52,8 +51,11 @@ class GenTTP(nn.Module):
         fused_dim: int = 64,
         mlp_hidden_dim: int = 64,
         target_dim: int = 1,
-        sequence_model: str = "lstm",      # "lstm_concat" / "gru" / "attention"
-        fuse_method: str = "concatenate",    # "concatenate" / "Hadamard" / "Attention"
+        sequence_model: str = "lstm",      # "lstm" / "gru" / "attention"
+        fuse_method: str = "concatenate",    # "concatenate" / "Hadamard" / "attention"
+        fuse_attention_num_heads: int = 4,
+        fuse_attention_ff_dim: int | None = None,
+        fuse_gated_update: bool = True,
         dropout: float = 0.1,
         device: str = "cpu",
         attention_num_heads: int = 4,
@@ -67,6 +69,7 @@ class GenTTP(nn.Module):
         default_use_gate=True,
         default_hard_gate=False,
         default_gate_threshold=0.5,
+
     ):
         super().__init__()
 
@@ -87,7 +90,7 @@ class GenTTP(nn.Module):
         canonical_fuse_method = {
             "concatenate": "concatenate",
             "hadamard": "Hadamard",
-            "attention": "Attention",
+            "attention": "attention",
         }.get(fuse_method.lower(), fuse_method)
 
         self.fuse_method = canonical_fuse_method
@@ -192,6 +195,10 @@ class GenTTP(nn.Module):
             dim_A=a_rep_dim,
             output_dim=fused_dim,
             method=canonical_fuse_method,
+            dropout=dropout,
+            attention_num_heads=fuse_attention_num_heads,
+            attention_ff_dim=fuse_attention_ff_dim,
+            gated_update=fuse_gated_update,
         )
 
         self.reg_head = nn.Sequential(
@@ -256,10 +263,11 @@ class GenTTP(nn.Module):
         return q_repr
 
     def encode_a(
-        self,
-        a: torch.Tensor,
-        lengths: torch.Tensor | None = None,
-        supports: list[torch.Tensor] | None = None,
+            self,
+            a: torch.Tensor,
+            lengths: torch.Tensor | None = None,
+            supports: list[torch.Tensor] | None = None,
+            return_sequence_for_attention_fuse: bool = False,
     ) -> torch.Tensor:
 
         """
@@ -283,11 +291,20 @@ class GenTTP(nn.Module):
             )
 
         elif self.sequence_model == "attention":
-            a_repr = self.a_encoder(
-                a_seq=a,
-                supports=supports,
-                lengths=lengths,
-            )
+            if return_sequence_for_attention_fuse:
+                _, a_seq_repr = self.a_encoder(
+                    a_seq=a,
+                    supports=supports,
+                    lengths=lengths,
+                    return_sequence=True,
+                )
+                a_repr = a_seq_repr
+            else:
+                a_repr = self.a_encoder(
+                    a_seq=a,
+                    supports=supports,
+                    lengths=lengths,
+                )
 
         else:
             raise RuntimeError("Unsupported sequence_model.")
@@ -328,8 +345,24 @@ class GenTTP(nn.Module):
         )
 
         q_repr = self.encode_q(q)
-        a_repr = self.encode_a(a, lengths=lengths, supports=supports)
-        fused = self.fuser(q_repr, a_repr)
+
+        use_assignment_sequence_in_fuse = (
+                self.sequence_model == "attention"
+                and self.fuse_method == "attention"
+        )
+
+        a_repr = self.encode_a(
+            a,
+            lengths=lengths,
+            supports=supports,
+            return_sequence_for_attention_fuse=use_assignment_sequence_in_fuse,
+        )
+
+        if self.fuse_method == "attention":
+            fused = self.fuser(q_repr, a_repr, lengths=lengths)
+        else:
+            fused = self.fuser(q_repr, a_repr)
+
 
         reg_raw = self.reg_head(fused)
         gate_logits = self.gate_head(fused)
