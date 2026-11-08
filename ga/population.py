@@ -10,9 +10,22 @@ class Population:
         self.individuals = [Individual.create(allowed_routes) for _ in range(population_size)]
 
     def evaluate(self, fitness_fn):
-        """Evaluate all individuals in the population."""
-        for ind in self.individuals:
+        """Evaluate individuals without fitness in the population."""
+
+        to_evaluate = [ind for ind in self.individuals if ind.fitness is None]
+        if not to_evaluate:
+            return
+        for ind in to_evaluate:
             ind.evaluate(fitness_fn)
+
+    def evaluate_batch(self, batch_fitness_fn):
+        """Evaluate all individuals without fitness in one batched call."""
+        to_evaluate = [ind for ind in self.individuals if ind.fitness is None]
+        if not to_evaluate:
+            return
+        fitnesses = batch_fitness_fn([ind.genotype for ind in to_evaluate])
+        for ind, fit in zip(to_evaluate, fitnesses):
+            ind.fitness = fit        
 
     def select(self, elite_size, selection_type="tournament"):
         """Selects individuals that pass to the next generation, the elite are directly copied."""
