@@ -16,6 +16,8 @@ def parse_args():
     parser.add_argument("--crossover_rate", type=float, default=0.9)
     parser.add_argument("--crossover_method", type=str, default="uniform",
                         choices=["uniform", "single_point"])
+    parser.add_argument("--selection_type", type=str, default="tournament",
+                        choices=["tournament", "roulette"])
     parser.add_argument("--mutation_rate", type=float, default=0.1)
     parser.add_argument("--elite_percent", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
