@@ -47,7 +47,7 @@ class Population:
                     parents.append(parent)
         return elite, parents
 
-    def crossover(self, crossover_rate, elite_percent=0.2, method="uniform"):
+    def crossover(self, crossover_rate, elite_percent=0.2, method="single_point"):
         """Performs crossover or copies parents to create a new generation."""
         new_generation = []
         elite, parents = self.select(int(self.population_size * elite_percent))

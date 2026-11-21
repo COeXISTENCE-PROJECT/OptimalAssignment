@@ -2,13 +2,13 @@ import torch
 from engine import TrainerGenTTP
 from utilities import load_csv_adj
 
-RUN_DIR = "outputs/checkpoints/"
-CHECKPOINT = f"{RUN_DIR}/checkpoint_best.pth"
-ADJ_FILE = f"{RUN_DIR}/21k_hex_adjacency_matrix.csv"
+MODEL_DIR = "outputs/models/"
+MODEL = f"{MODEL_DIR}/checkpoint_best.pth"
+ADJ_FILE = f"{MODEL_DIR}/21k_hex_adjacency_matrix.csv"
 NUM_NODES = 195
 
 
-def load_model(checkpoint=CHECKPOINT, adj_file=ADJ_FILE, device="cpu"):
+def load_model(model=MODEL, adj_file=ADJ_FILE, device="cpu"):
     device = torch.device(device)
     supports = load_csv_adj(adj_file, NUM_NODES, device)
 
@@ -25,7 +25,7 @@ def load_model(checkpoint=CHECKPOINT, adj_file=ADJ_FILE, device="cpu"):
         fuse_attention_num_heads=2, fuse_attention_ff_dim=128,
         fuse_gated_update=True,
     )
-    state = torch.load(checkpoint, map_location=device)
+    state = torch.load(model, map_location=device)
     trainer.model.load_state_dict(state)
     trainer.model.eval()
     return trainer.model

@@ -21,9 +21,8 @@ class Individual:
                 self.genotype[i] = random.choice(allowed_routes[i])
                 self.fitness = None
 
-    def crossover(self, other, method="uniform"):
+    def crossover(self, other, method="single_point"):
         """Performs crossover with another individual and returns two offspring.
-
         method="uniform":      each agent's route is taken from a randomly chosen parent.
         method="single_point": genes before a random point come from one parent, the rest from the other.
         """
